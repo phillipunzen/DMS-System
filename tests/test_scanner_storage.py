@@ -310,3 +310,52 @@ def test_scanner_listener_configuration(monkeypatch):
     with pytest.raises(ValueError): service.scanner_ports()
     monkeypatch.setenv('FTP_PASSIVE_MAX', '65536')
     with pytest.raises(ValueError): service.scanner_ports()
+
+
+@pytest.mark.parametrize('version', ['3', '4', '4.1', '4.2'])
+def test_nfs_protocol_locking_and_mount_safety(tmp_path,monkeypatch,version):
+    monkeypatch.setenv('STORAGE_SERVICE_TOKEN','test-storage-token-'*4)
+    from storage_service import server
+    from types import SimpleNamespace
+    commands=[]
+    def successful_mount(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stderr=b'')
+    monkeypatch.setattr(server.subprocess,'run',successful_mount)
+    server.mount_share({'protocol':'nfs','host':'nas.example.com','share':'/var/nfs/shared/DMS','nfs_version':version},tmp_path/'mount')
+    options=set(commands[0][-1].split(','))
+    assert {'vers='+version,'hard','nosuid','nodev','noexec','proto=tcp','resvport'} <= options
+    assert ('nolock' in options) == (version=='3')
+    assert ('mountproto=tcp' in options) == (version=='3')
+    assert 'soft' not in options and 'nosoft' not in options
+
+
+@pytest.mark.parametrize(('stderr','expected'), [
+    (b'mount.nfs: rpc.statd is not running but is required for remote locking.', 'Sperrdienst'),
+    (b'mount.nfs: access denied by server while mounting nas:/private-export', 'Exportpfad'),
+    (b'mount.nfs: requested NFS version or transport protocol is not supported', 'NFS-Version'),
+    (b'mount.nfs: Connection refused', 'RPC-Dienst'),
+    (b'mount.nfs: Operation not permitted', 'Host-Umgebung'),
+    (b'mount.nfs: unknown error for nas:/private-export', 'NAS konnte nicht'),
+])
+def test_nfs_mount_error_preserves_active_storage(tmp_path,monkeypatch,stderr,expected):
+    monkeypatch.setenv('STORAGE_SERVICE_TOKEN','test-storage-token-'*4)
+    from storage_service import server
+    from types import SimpleNamespace
+    from fastapi.testclient import TestClient
+    state=tmp_path/'state';state.mkdir()
+    mounts=tmp_path/'mounts';mounts.mkdir()
+    monkeypatch.setattr(server,'STATE_ROOT',state)
+    monkeypatch.setattr(server,'NAS_ROOT',mounts)
+    monkeypatch.setattr(server.subprocess,'run',lambda *args,**kwargs:SimpleNamespace(returncode=32,stderr=stderr))
+    def no_write(*args):raise AssertionError('Write probe must not run after a failed mount')
+    monkeypatch.setattr(server,'write_probe',no_write)
+    with TestClient(server.app) as client:
+        before=(state/'active.json').read_bytes()
+        response=client.post('/apply',headers={'Authorization':'Bearer '+server.TOKEN},json={
+            'protocol':'nfs','host':'nas','share':'/var/nfs/shared/DMS','subdirectory':'archivraum','nfs_version':'3'})
+        assert response.status_code==422,response.text
+        assert expected in response.json()['detail']
+        assert '/private-export' not in response.text
+        assert (state/'active.json').read_bytes()==before
+        assert not list(mounts.iterdir())

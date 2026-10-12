@@ -93,7 +93,7 @@ services:
           propagation: rshared
     networks: [default]
     cap_drop: [ALL]
-    cap_add: [SYS_ADMIN, DAC_OVERRIDE, CHOWN, SETUID, SETGID, FOWNER]
+    cap_add: [SYS_ADMIN, DAC_OVERRIDE, CHOWN, SETUID, SETGID, FOWNER, NET_BIND_SERVICE]
     security_opt: [no-new-privileges:true, apparmor:unconfined]
     read_only: true
     tmpfs:

@@ -129,7 +129,8 @@ def finalize_source(db, receipt, paths):
 def import_directory(db, integration, config, retry_errors=False):
     paths = directories(integration.tenant_id)
     # API and background worker are separate processes. The shared file lock spans
-    # the per-file DB commits and source cleanup, including on NAS with POSIX locks.
+    # the per-file DB commits and source cleanup. Managed NFS v3 uses client-local
+    # locks shared by API/worker on the same host and propagated mount.
     lock_fd = os.open(paths['tenant'] / '.import.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o640)
     imported = duplicates = failed = waiting = 0
     try:

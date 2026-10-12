@@ -88,11 +88,30 @@ def mount_share(config, mount):
             command = ['mount', '-t', 'cifs', source, str(mount), '-o', f'credentials={credentials_path},vers=3.0,uid=10001,gid=10001,forceuid,forcegid,file_mode=0600,dir_mode=0700,nosuid,nodev,noexec']
         else:
             source = config['host'] + ':' + config['share']
-            command = ['mount', '-t', 'nfs', source, str(mount), '-o', 'vers=' + config.get('nfs_version', '4') + ',hard,retry=0,timeo=50,retrans=2,nosuid,nodev,noexec']
+            version = config.get('nfs_version', '4')
+            options = 'vers=' + version + ',hard,retry=0,timeo=50,retrans=2,nosuid,nodev,noexec,proto=tcp,resvport'
+            if version == '3':
+                # One DMS host owns this NAS tree. Local client locks still
+                # serialize API/worker imports on the same propagated mount;
+                # remote NLM locks would require rpc.statd in this container.
+                options += ',nolock,mountproto=tcp'
+            command = ['mount', '-t', 'nfs', source, str(mount), '-o', options]
         result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=30)
         if result.returncode and b'Operation not permitted' in result.stderr:
             raise HTTPException(422, 'Die Host-Umgebung verbietet SMB/NFS-Mounts. In einem unprivilegierten LXC sind native NAS-Mounts nicht möglich. Docker in einer VM verwenden oder NAS auf dem übergeordneten Host einbinden. Siehe README.')
         if result.returncode:
+            # Expose actionable categories to the admin, never raw helper
+            # output which could include NAS paths or SMB credentials.
+            error = result.stderr.decode(errors='replace').lower()
+            if config['protocol'] == 'nfs':
+                if 'rpc.statd' in error:
+                    raise HTTPException(422, 'NFS-v3-Sperrdienst fehlt. Das aktuelle DMS-Image verwendet lokale Dateisperren; Speichercontainer aktualisieren.')
+                if 'access denied by server' in error:
+                    raise HTTPException(422, 'NFS-Server verweigert den Mount. NFS-Zugriff für die IP des DMS-Servers erlauben und den vollständigen Exportpfad prüfen, bei UniFi beispielsweise /var/nfs/shared/FREIGABE.')
+                if 'not supported' in error:
+                    raise HTTPException(422, 'NFS-Version oder Transport wird nicht unterstützt. NAS-Version und geladenes NFS-Kernelmodul auf dem Docker-Host prüfen.')
+                if any(message in error for message in ('connection refused', 'program not registered', 'unable to receive', 'no route to host', 'connection timed out')):
+                    raise HTTPException(422, 'NFS/RPC-Dienst nicht erreichbar. NFS am NAS aktivieren und Netzwerk sowie RPC-Port 111, NFS-Port 2049 und bei NFS v3 den Mountd-Port prüfen.')
             raise HTTPException(422, 'NAS konnte nicht eingebunden werden. Adresse, Zugangsdaten, NAS-Berechtigungen und Mount-Rechte des Speichercontainers prüfen.')
     except subprocess.TimeoutExpired:
         raise HTTPException(504, 'NAS antwortet nicht rechtzeitig.')
@@ -136,7 +155,7 @@ finally: f.unlink(missing_ok=True)
         result = subprocess.run(['python', '-c', script, str(mount / subdirectory)], user=10001, group=10001, extra_groups=[],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
         if result.returncode:
-            raise HTTPException(422, 'NAS verbunden, aber UID/GID 10001 kann dort nicht sicher schreiben und lesen. NAS-Freigaberechte prüfen.')
+            raise HTTPException(422, 'NAS verbunden, aber UID/GID 10001 kann dort nicht sicher schreiben und lesen. NAS-Freigaberechte und bei NFS die Squash-Benutzerzuordnung prüfen.')
     except subprocess.TimeoutExpired:
         raise HTTPException(504, 'NAS-Schreibprüfung hat das Zeitlimit überschritten.')
 
