@@ -11,7 +11,8 @@ path = args.path.resolve()
 if path == Path('/') or len(path.parts) < 3:
     parser.error('Use a dedicated directory, such as /srv/dms-system/nas.')
 path.mkdir(parents=True, exist_ok=True, mode=0o755)
-if not path.is_mount():
+# is_mount() cannot reliably detect same-filesystem bind mounts.
+if subprocess.run(['mountpoint', '-q', str(path)]).returncode != 0:
     subprocess.run(['mount', '--bind', str(path), str(path)], check=True)
 subprocess.run(['mount', '--make-rshared', str(path)], check=True)
 print(f'Shared NAS mount parent ready: {path}')
