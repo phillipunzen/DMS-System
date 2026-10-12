@@ -38,7 +38,11 @@ def external_user(db, provider, subject, email, name, request=None):
     user = db.scalar(select(User).where(User.email == email))
     if user:
         # Linking an existing local account requires a current authenticated session.
-        if not request or current_user(request, db).id != user.id:
+        try:
+            authenticated = current_user(request, db) if request else None
+        except HTTPException:
+            authenticated = None
+        if not authenticated or authenticated.id != user.id:
             raise HTTPException(409, 'Bestehendes Konto zuerst lokal anmelden, dann OIDC verknüpfen.')
     else:
         invited = db.scalar(select(Invitation.id).where(Invitation.email == email, Invitation.used_at.is_(None), Invitation.expires_at > now()))
@@ -59,6 +63,8 @@ def validate_auth(kind, config, enabled):
     if any(not config.get(k) for k in required):
         raise HTTPException(422, 'Pflichtfelder der Authentifizierung fehlen.')
     if kind == 'oidc':
+        if not isinstance(config.get('require_verified_email', False), bool):
+            raise HTTPException(422, 'E-Mail-Bestätigung muss ein Wahrheitswert sein.')
         if urlparse(config['discovery_url']).scheme != 'https' or urlparse(config['redirect_uri']).scheme not in {'http', 'https'}:
             raise HTTPException(422, 'OIDC-Discovery muss HTTPS verwenden.')
     else:

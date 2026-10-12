@@ -13,7 +13,6 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy import select, func, or_, update, delete, case
 from sqlalchemy.exc import IntegrityError
-from authlib.integrations.starlette_client import OAuth
 from .db import *
 from .security import *
 from .schemas import *
@@ -786,41 +785,53 @@ def save_auth(kind: str, data: IntegrationInput, user=Depends(admin_user), db=De
     return {'ok': True}
 
 
-def oidc_client(db):
-    value = setting(db, 'oidc')
-    if not value:
-        raise HTTPException(400, 'OIDC ist nicht konfiguriert.')
-    config = decrypt(value)
-    oauth = OAuth()
-    oauth.register(name='provider', client_id=config['client_id'], client_secret=config['client_secret'], server_metadata_url=config['discovery_url'], client_kwargs={'scope': 'openid profile email', 'code_challenge_method': 'S256'})
-    return oauth.create_client('provider'), config
+from .oidc import (router as oidc_router, client_for as oidc_client, claims_error,
+                   ERRORS as OIDC_ERRORS, error_code, test_user, save_result, check, account_check)
+app.include_router(oidc_router)
 
 
 @app.get('/api/auth/oidc')
 async def oidc_start(request: Request, db=Depends(get_db)):
     client, config = oidc_client(db)
+    request.session.clear()
     return await client.authorize_redirect(request, config['redirect_uri'])
 
 
 @app.get('/api/auth/oidc/callback')
 async def oidc_callback(request: Request, db=Depends(get_db)):
     from .auth import external_user
-    client, config = oidc_client(db)
+    marker = request.session.get('oidc_test')
+    reason = None
     try:
+        tester = test_user(request, db, marker) if marker else None
+        client, config = oidc_client(db)
         token = await client.authorize_access_token(request)
         info = token.get('userinfo')
-        if not info or not info.get('sub') or not info.get('email') or info.get('email_verified') is not True:
-            raise ValueError('Verifizierte E-Mail erforderlich')
-        user = external_user(db, 'oidc:' + info['iss'], info['sub'], info['email'], info.get('name', info['email']), request)
+        reason = claims_error(info, config)
+        if reason:
+            raise ValueError('claims')
+        if marker:
+            checks = [check('token', 'Anmeldung und Token', 'success', 'Rückleitung, Client-Secret, PKCE, Signatur und ID-Token-Prüfung erfolgreich.'),
+                      check('email', 'E-Mail-Adresse', 'success', 'E-Mail-Adresse vorhanden. Bestätigung ist erforderlich und erfüllt.' if config.get('require_verified_email', False) else 'E-Mail-Adresse vorhanden. Eine Bestätigung ist nicht erforderlich.'),
+                      account_check(db, info, tester)]
+            save_result(request, marker, checks)
+            return RedirectResponse('/?oidc_test=1')
+        user = external_user(db, 'oidc:' + info['iss'], info['sub'], info['email'], info.get('name') or info['email'], request)
         response = RedirectResponse('/')
         challenge = login(db, user, response)
         if challenge:
             response.headers['location'] = '/?mfa=1'
         request.session.clear()
         return response
-    except Exception:
+    except Exception as exc:
         db.rollback()
-        return RedirectResponse('/?auth_error=1')
+        reason = reason or ('state' if marker and isinstance(exc, ValueError) and str(exc) == 'state' else error_code(exc))
+        if marker:
+            save_result(request, marker, [check('signin', 'Anmeldetest', 'error', OIDC_ERRORS[reason])])
+            return RedirectResponse('/?oidc_test=1')
+        # Preserve outstanding state after an unrelated callback; Authlib consumes the matching state.
+        suffix = '' if reason == 'state' else '&reason=' + reason
+        return RedirectResponse('/?auth_error=1' + suffix)
 
 
 @app.get('/')
