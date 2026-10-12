@@ -8,7 +8,8 @@ from sqlalchemy import select, func, or_
 import magic
 from .db import Document, DocumentVersion, Tenant, uid
 
-ROOT = Path(os.getenv('STORAGE_ROOT', '/data/documents')).resolve()
+from .storage_control import StoragePath
+ROOT = StoragePath('documents')
 MAX_UPLOAD = int(os.getenv('MAX_UPLOAD_MB', '50')) * 1024 * 1024
 ALLOWED = {'application/pdf', 'image/png', 'image/jpeg', 'image/tiff', 'text/plain'}
 
@@ -74,6 +75,7 @@ def save_document(db, tenant_id, user_id, filename, stream, source='upload'):
                     raise HTTPException(413, 'Datei überschreitet das Upload-Limit.')
                 sha.update(chunk)
                 temp.write(chunk)
+            temp.flush(); os.fsync(temp.fileno())
         if not size:
             raise HTTPException(422, 'Die Datei ist leer.')
         mime = magic.from_file(str(temp_path), mime=True)

@@ -2,9 +2,9 @@
 
 ## Full-instance recovery
 
-A complete backup needs the MariaDB database, all document versions, scanner input, deployment configuration including `SECRET_KEY`, and the private Codex authentication volume. Backups contain confidential documents and credentials; protect them and keep a copy outside the original server/NAS.
+A complete backup needs the MariaDB database, all document versions, scanner input, deployment configuration including `SECRET_KEY`, the private Codex authentication volume, `storage_state` and `scanner_state` (persistent SSH host key), and `STORAGE_SERVICE_TOKEN`. Backups contain confidential documents and credentials; protect them and keep a copy outside the original server/NAS.
 
-For external MariaDB and NAS storage, use their backup/snapshot tooling and coordinate database and filesystem consistency. The development helper `scripts/backup_dev.py` applies only to the source-build stack (`compose.yaml` + `compose.dev.yaml`). Its files are `database.sql`, `documents.tar`, `consume.tar`, `codex_auth.tar`, `configuration.tar` and `manifest.json`.
+For external MariaDB and NAS storage, use their backup/snapshot tooling and coordinate database and filesystem consistency. The development helper `scripts/backup_dev.py` applies only to the source-build stack (`compose.yaml` + `compose.dev.yaml`). Its files are `database.sql`, `documents.tar`, `consume.tar`, `codex_auth.tar`, `storage_state.tar`, `scanner_state.tar`, `configuration.tar` and `manifest.json`.
 
 A full restore replaces data. First test on a separate instance with its own database, volumes, scanner path and port:
 
@@ -28,6 +28,10 @@ A full restore replaces data. First test on a separate instance with its own dat
    ```
 
    Restore `consume.tar` into its separate scanner-input mount and apply UID/GID 10001 permissions. The development source-build restore instead uses `-f compose.yaml -f compose.dev.yaml` consistently for every command.
+
+   For a **local-mode restore test**, keep the new `storage_state` empty so the helper initializes local mode, and restore documents/consume into the new local mounts. Do not restore an active NAS pointer into a test that must not touch the real NAS. Use a separate `NAS_MOUNT_PATH` prepared with `scripts/prepare_storage.py` and different SFTP/FTP ports; disable scanner integrations before starting the restored scanner service.
+
+   On the final recovery instance, `storage_state.tar` contains the encrypted NAS connection and active mount location. Preserve `STORAGE_SERVICE_TOKEN`, restore the state volume with UID/GID 10001, prepare the shared mount parent, and start `storage` before the application. The helper reconstructs a missing active mount. Restore documents/consume into the **active NAS roots**, not blindly into the unused local volume. Always verify that the destination is the intended recovery NAS, and keep writers stopped. Restore `scanner_state.tar` with UID/GID 10001 to preserve the SSH host key; a new key otherwise requires scanner trust to be updated. Incomplete `.part` transfers are discarded by the scanner on startup, while completed sources are in `consume`.
 
    `codex_auth.tar` contains sensitive ChatGPT tokens. For an isolated restore test, start Codex with an empty dedicated volume. On the final recovery instance, restore it only into that instance's `codex_auth` volume and assign UID/GID 10002. Expired tokens may require a new login.
 

@@ -13,7 +13,8 @@ from sqlalchemy import select
 from .db import Audit, Document, DocumentVersion, Folder, FolderImport, Integration, Membership, Tenant, now
 from .storage import path_for, save_document
 
-ROOT = Path(os.getenv('CONSUME_ROOT', '/data/consume')).resolve()
+from .storage_control import StoragePath
+ROOT = StoragePath('consume')
 
 
 def directories(tenant_id):
@@ -33,7 +34,9 @@ def directories(tenant_id):
 def public_paths(tenant_id):
     uuid.UUID(tenant_id)
     host_root = os.getenv('CONSUME_HOST_PATH', '')
-    root = Path(host_root) if host_root else ROOT
+    from .storage_control import state
+    data = state()
+    root = (Path(os.getenv('NAS_MOUNT_PATH', '/srv/dms-system/nas')) / Path(data['mount']).name / data['subdirectory'] / 'consume') if data['mode'] == 'nas' else Path(host_root) if host_root else ROOT
     return {'incoming': str(root / tenant_id / 'eingang'),
             'processed': str(root / tenant_id / 'verarbeitet')}
 

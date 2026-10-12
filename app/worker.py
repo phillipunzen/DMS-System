@@ -22,7 +22,7 @@ def heartbeat(document_id, stop):
             logging.warning('Worker-Heartbeat nicht gespeichert')
 
 
-def tick():
+def _tick():
     busy = False
     with SessionLocal() as db:
         db.execute(update(Document).where(Document.status == 'processing', Document.heartbeat_at < now() - timedelta(minutes=5)).values(status='queued'))
@@ -75,6 +75,13 @@ def tick():
             if not integration.last_run or (now() - integration.last_run).total_seconds() >= interval:
                 run_integration_once(db, integration)
         return busy
+
+
+def tick():
+    from .storage_control import storage_gate, root
+    with storage_gate():
+        root('documents')
+        return _tick()
 
 
 if __name__ == '__main__':

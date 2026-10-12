@@ -425,7 +425,16 @@ def shared_file(token: str, request: Request, db=Depends(get_db)):
 @router.get('/api/admin/system-status')
 def system_status(user=Depends(admin_user), db=Depends(get_db)):
     db.execute(select(1))
-    disk = shutil.disk_usage(ROOT)
+    from .storage_control import root
+    from collections import namedtuple
+    try:
+        disk = shutil.disk_usage(ROOT)
+        writable = os.access(ROOT, os.W_OK)
+        consume = root('consume')
+        scanner_available = consume.is_dir() and os.access(consume, os.R_OK)
+    except (HTTPException, OSError):
+        disk = namedtuple('DiskUsage', 'total used free')(0, 0, 0)
+        writable = scanner_available = False
     heartbeat = db.get(Setting, 'worker.last_tick')
     last = heartbeat.value if heartbeat else None
     from datetime import datetime
@@ -434,10 +443,9 @@ def system_status(user=Depends(admin_user), db=Depends(get_db)):
     phases = dict(db.execute(select(Document.status, func.count()).where(Document.deleted_at.is_(None)).group_by(Document.status)).all())
     last_backup = db.scalar(select(Audit.created_at).where(Audit.action == 'tenant.backup_exported').order_by(Audit.created_at.desc()).limit(1))
     integrations = db.execute(select(Integration.kind, Integration.enabled, Integration.last_run, Integration.last_status).where(Integration.kind.in_(['imap','folder','caldav']))).all()
-    consume = Path(os.getenv('CONSUME_ROOT', '/data/consume'))
     return {'database': 'ok', 'worker': {'healthy': age is not None and age < 90, 'last_tick': last},
-        'storage': {'total': disk.total, 'free': disk.free, 'used': disk.used, 'writable': os.access(ROOT, os.W_OK),
-            'scanner_available': consume.is_dir() and os.access(consume, os.R_OK)},
+        'storage': {'total': disk.total, 'free': disk.free, 'used': disk.used, 'writable': writable,
+            'scanner_available': scanner_available},
         'documents': phases, 'ai_pending': db.scalar(select(func.count()).select_from(Document).where(Document.ai_pending.is_(True), Document.deleted_at.is_(None))),
         'ocr_available': all(shutil.which(x) for x in ['tesseract', 'pdftotext', 'pdftoppm']),
         'ocr_warnings': db.scalar(select(func.count()).select_from(Document).where(Document.ocr_failed.is_(True), Document.deleted_at.is_(None))),

@@ -1,0 +1,14 @@
+[Unit]
+Description=Shared mount parent for DMS NAS manager
+Before=docker.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/mkdir -p /srv/dms-system/nas
+ExecStart=/bin/sh -c '/usr/bin/mountpoint -q /srv/dms-system/nas || /bin/mount --bind /srv/dms-system/nas /srv/dms-system/nas'
+ExecStart=/bin/mount --make-rshared /srv/dms-system/nas
+
+[Install]
+WantedBy=multi-user.target

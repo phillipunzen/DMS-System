@@ -11,7 +11,7 @@ A self-hosted, multi-tenant document management system with local OCR, immutable
 - Immutable file versions; restoring an older version creates a new current version. All historical versions count toward storage usage.
 - Optional review/approval workflows per tenant. A different eligible member approves or rejects the current version; document changes invalidate approval and preserve history.
 - Mobile camera imports with local rotation/cropping and up to 20 pages per PDF. Camera-generated PDFs discard EXIF/location metadata.
-- Tenant-specific scanner folders, automatic filing and filename rules, read-only IMAP ingestion and outgoing CalDAV due-date synchronization.
+- Per-tenant SFTP scanner accounts with generated credentials, optional explicitly enabled FTP, Web UI managed SMB/NFS storage, tenant-specific scanner folders, automatic filing and filename rules, read-only IMAP ingestion and outgoing CalDAV due-date synchronization.
 - Local accounts, LDAP/Microsoft AD, OIDC, optional TOTP two-factor authentication and one-use recovery codes.
 - Optional automatic AI metadata extraction through Codex with a ChatGPT subscription or the OpenAI Responses API.
 - Duplicate prevention including historical versions, and a permission-filtered view of similar OCR texts.
@@ -28,10 +28,12 @@ A self-hosted, multi-tenant document management system with local OCR, immutable
 | Component | Published image | Purpose |
 | --- | --- | --- |
 | Application | `ghcr.io/phillipunzen/dms-system:latest` | FastAPI web application, OCR and background worker; UID/GID 10001 |
+| NAS manager | `ghcr.io/phillipunzen/dms-system:latest` | Separate root helper for SMB/NFS mounts and verified storage migration; no database or app secret |
+| Scanner gateway | `ghcr.io/phillipunzen/dms-system:latest` | Upload-only SFTP/optional FTP; unprivileged UID/GID 10001 |
 | Private Codex gateway | `ghcr.io/phillipunzen/dms-system-codex:latest` | Official Codex CLI, subscription login and metadata extraction; UID/GID 10002 |
 | Database | Your external MariaDB | Database and dedicated credentials supplied through `DATABASE_URL` |
 
-Images target **Linux/amd64**. The default deployment runs one application container and one private Codex container. The Codex service exposes no host port and has no document mount or database credentials. The optional database override runs a local MariaDB 11.4 for evaluation.
+Images target **Linux/amd64**. The default deployment runs the application, isolated NAS manager, scanner gateway and private Codex gateway. The NAS manager alone has mount capabilities; it has no Docker socket. The Codex service exposes no host port and has no document mount or database credentials. The optional database override runs a local MariaDB 11.4 for evaluation.
 
 [GitHub Actions](https://github.com/phillipunzen/DMS-System/actions) runs SQLite and MariaDB functional tests before publishing both images. Pushes to `main` update `latest` and a `sha-<short-commit>` tag. Version tags such as `v1.0.0` publish `1.0.0`; they do not replace `latest`. A manual workflow run on `main` also publishes images. No Docker Hub credentials are required; the workflow uses GitHub's built-in `GITHUB_TOKEN` with `packages: write`.
 
@@ -47,6 +49,8 @@ cd DMS-System
 python3 scripts/init_env.py
 mkdir -p consume
 sudo chown 10001:10001 consume
+# One-time preparation for mount propagation from the NAS manager:
+sudo python3 scripts/prepare_storage.py /srv/dms-system/nas
 ```
 
 The generator refuses to overwrite an existing `.env`. It creates `.env` and `INITIAL_ACCESS.txt` with mode 0600 and random secrets. Its defaults are for **local HTTP evaluation** with a local database. Before an external-database deployment, edit `.env`:
@@ -55,7 +59,7 @@ The generator refuses to overwrite an existing `.env`. It creates `.env` and `IN
 # Set your external database host and URL-encode the username/password.
 DATABASE_URL=mysql+pymysql://dms:URL_ENCODED_PASSWORD@mariadb.internal:3306/dms?charset=utf8mb4
 BOOTSTRAP_ADMIN_EMAIL=admin@example.org
-# Keep the generated SECRET_KEY, CODEX_SERVICE_TOKEN and bootstrap password.
+# Keep the generated SECRET_KEY, CODEX_SERVICE_TOKEN, STORAGE_SERVICE_TOKEN and bootstrap password.
 
 # For a host reverse proxy with HTTPS:
 APP_BIND=127.0.0.1
@@ -63,13 +67,18 @@ APP_PORT=8120
 COOKIE_SECURE=true
 ALLOWED_HOSTS=dms.example.org,archive.example.org
 
-# Default: Docker-managed document volume. For NAS use a mounted absolute path.
+# Local starting storage; configure SMB/NFS later in the web UI.
 DOCUMENTS_PATH=documents
 # Use the absolute path to the prepared scanner input directory.
 CONSUME_PATH=/srv/dms/consume
 MAX_UPLOAD_MB=50
 MAX_TENANT_BACKUP_MB=250
 IMAGE_TAG=latest
+NAS_MOUNT_PATH=/srv/dms-system/nas
+SCANNER_PUBLIC_HOST=dms.example.org
+SCANNER_BIND=0.0.0.0
+SFTP_PORT=2222
+FTP_PORT=2121
 ```
 
 Prepare the actual `CONSUME_PATH` with UID/GID 10001 write access. Start the image deployment:
@@ -119,7 +128,7 @@ docker compose -f docker-compose.yml logs --tail=100 app
 | `APP_BIND` / `APP_PORT` | Published application bind address and port; defaults in the image Compose file are `127.0.0.1:8120`. |
 | `COOKIE_SECURE` | `true` behind HTTPS; `false` only for direct HTTP evaluation. |
 | `ALLOWED_HOSTS` | Comma-separated IPs/hostnames without scheme/port; further domains can be configured in the admin panel. |
-| `DOCUMENTS_PATH` | Docker document volume name or pre-mounted absolute NAS/host directory. |
+| `DOCUMENTS_PATH` | Local starting document volume or host directory. Web UI NAS migration retains the original copy. |
 | `CONSUME_PATH` | Separate scanner input directory; an absolute host path is recommended. |
 | `MAX_UPLOAD_MB` | Per-upload limit; default 50 MB. |
 | `MAX_TENANT_BACKUP_MB` | Web tenant backup/restore limit; default 250 MB. |
@@ -130,7 +139,29 @@ For database TLS, mount the CA file into the application and add PyMySQL URL opt
 
 ## NAS storage, scanner folders and domains
 
-Mount SMB/CIFS or NFS **on the host**, then set `DOCUMENTS_PATH` to the mount path. UID/GID 10001 must be able to create directories, read, write, rename and lock files. Newly created original files use mode 0600; tenant/document directories use 0700 where supported. Apply equivalent NAS permissions and tenant separation. Ensure the NAS is mounted before starting the app so missing mounts cannot silently become local directories.
+### Connect SMB or NFS in the web UI
+
+Under **Speicher & Scanner → NAS-Verbindung**, the server administrator chooses SMB or NFS, enters the NAS host, share/export and an application subdirectory, and tests the connection. SMB additionally needs a username/password and optional domain. NFS supports versions 3, 4, 4.1 and 4.2 and requires read/write access for UID/GID **10001**. SMB mounts use SMB 3.0 with UID/GID 10001, file mode 0600 and directory mode 0700. Use a dedicated NAS account/export restricted to this application.
+
+The separate `storage` container performs mounts. Its HTTP control API has no published host port, requires a random `STORAGE_SERVICE_TOKEN`, and has no database credentials, `SECRET_KEY`, Docker socket or unrestricted privileged mode. Only this helper has `SYS_ADMIN` and the small set of file/user capabilities it needs. Its AppArmor profile is disabled for native mounts; the app and scanner retain dropped capabilities. The Docker host must allow native CIFS/NFS mounts and have the corresponding kernel support. An unprivileged LXC cannot perform native CIFS/NFS mounts merely by enabling mount feature flags. For Web UI managed native mounts, run Docker in a VM or on a normal Linux host. On Proxmox, a privileged LXC with the CIFS/NFS mount features is another deployment option, but do not toggle the existing container’s unprivileged flag: plan a separate properly restored container. Alternatively mount the NAS on the Proxmox host and pass it through to an unprivileged LXC; this uses operator-managed `DOCUMENTS_PATH`/`CONSUME_PATH` and the NAS connection then belongs to the host. See [Proxmox container documentation](https://github.com/proxmox/pve-docs/blob/master/pct.adoc).
+
+**One-time host setup is still required**, but NAS credentials and individual connections are then managed centrally in the UI. Native mounts must propagate between containers. Run `scripts/prepare_storage.py` on a dedicated absolute host directory, and set `NAS_MOUNT_PATH` to that path. This prepares a shared bind parent; it does not mount your NAS. Docker named volumes cannot provide bind mount propagation. Reapply the preparation after a host reboot. For a permanent setup, install the supplied `scripts/dms-nas-mounts.service` in `/etc/systemd/system/`, adjust its paths if necessary, then enable it with `sudo systemctl enable --now dms-nas-mounts.service`. The supplied unit checks for an existing mount and is safe to apply after the preparation script.
+
+**Speicher aktivieren & Dateien übernehmen** pauses concurrent API file access, worker imports and scanner transfers through a shared lock. If a transfer/job is still active, retry once it finishes. All existing document versions and scanner sources are copied, synced and checksum verified before an atomic storage-state switch. Conflicting destination files and symlinks abort migration. The old copy is retained; manually retire it only after verification and a separate backup. The same migration mechanism can switch back to local storage. Applying new credentials or a different NFS version to the same protocol/host/share/subdirectory reconnects that existing NAS tree without copying it; this also permits recovery after a missing mount. A different target requires the previous storage to remain readable so migration can verify the source. A test creates and removes a small temporary file and prepares the application subdirectories without switching storage.
+
+The NAS contains `<subdirectory>/documents` and `<subdirectory>/consume`, each separated by tenant UUID. Encrypted NAS credentials and active storage state persist in `storage_state`; the app database also stores encrypted configuration. Mount flags are `nosuid,nodev,noexec`. After a helper restart, missing mounts are retried approximately every 20 seconds. Every document/inbox path verifies the expected NAS mount in its own container namespace. A missing mount blocks file access rather than writing into the underlying local directory. An unreachable but still mounted NFS server uses hard mounts: file operations may wait until the NAS returns; it never switches to local storage automatically. The UI's “Eingebunden” status confirms the kernel mount; use **Verbindung prüfen** to test actual NAS reachability/read/write.
+
+A pre-mounted `DOCUMENTS_PATH` remains possible for operator-managed storage. Automatic mount checks apply to **Web UI managed** NAS connections; for an operator-managed local-mode path, the operator must guarantee the host mount before starting containers.
+
+### Generate a scanner connection per tenant
+
+The tenant owner opens **Archiv-Import**, leaves **SFTP** selected, and activates it. The UI generates a dedicated username and strong password, plus a `sftp://username@host:port/eingang` link. Enter the shown server, port, username, password and directory separately if the scanner does not accept URLs. The password is deliberately omitted from the link. Compare the displayed persistent SSH host-key fingerprint when your scanner supports host verification. Scanner credentials are encrypted at rest and only visible to tenant owners. Password rotation, disabling the account, changing protocol or disabling FTP on the server revokes existing transfers at the next write/finalization.
+
+**FTP is optional** for scanners that cannot use SFTP. The owner must select FTP and explicitly acknowledge unencrypted transmission; SFTP remains the default. FTP sends passwords/documents in cleartext and belongs on a trusted LAN or VPN. The server administrator can disallow it globally. Use passive FTP and binary transfer mode. Default published ports are **2222/TCP SFTP**, **2121/TCP FTP**, and **30000–30009/TCP passive FTP data**. Set `SCANNER_BIND`/firewall rules to the intended scanner network; normal HTTP reverse proxies do not forward these protocols. For port 21/22 scanners, change the external `FTP_PORT`/`SFTP_PORT` mappings. The UI's scanner server settings change the displayed public address/ports, not Docker's listeners or firewall. Behind NAT, forward both the FTP control and passive data ports, and set `FTP_PASV_ADDRESS` if the advertised IPv4 differs from the scanner hostname.
+
+Accounts are virtual and upload-only: no shell, command execution, port forwarding, archived-document downloads, path traversal, anonymous access or cross-tenant access. Uploads are bounded by the normal file-size limit and staged separately. An interrupted transfer is never imported. Only a fully received, synced, format-checked and checksum-verified file is atomically published into that tenant's inbox. Existing input names are never overwritten; configure unique scanner filenames. Staging lives in `scanner_state`, so allow sufficient local disk space even when documents use NAS storage. The service bounds connections and login attempts; completed uploads cannot exceed the configured per-file limit, while tenant archive quota is enforced again during import.
+
+Activating **Archiv-Import** also enables that tenant's folder integration with source deletion by default and a five-second settle delay. Existing folder settings are preserved, including optional processed-source archiving. Disabling the scanner account prevents new network uploads; the folder integration can continue processing already completed files. Its settings and retained error files remain under **Integrationen → Scanner-Importordner**.
 
 Storage layout:
 
@@ -246,7 +277,7 @@ Tenant owners can download a password-encrypted `.dmsbackup` under **Raumeinstel
 
 Restoration creates a new tenant owned only by the restoring user. Previous users must be reinvited, permissions reapplied and approvals renewed. Archived rights/reviews and original note/annotation authors are available for inspection. Restored notes and annotations are assigned to the restoring owner, without creating former accounts. External links are not recreated. Account passwords, MFA secrets and integration credentials are not imported; restoration does not automatically send documents to AI.
 
-For full recovery, coordinate MariaDB, document/NAS storage, scanner input, `.env`/`SECRET_KEY` and Codex auth backups. A database dump without files, or files without metadata, is incomplete. Store backups separately and protect their secrets. [Restore guide](docs/RESTORE.md).
+For full recovery, coordinate MariaDB, document/NAS storage, scanner input, `.env`/`SECRET_KEY`/`STORAGE_SERVICE_TOKEN`, `storage_state`, `scanner_state` (including the SSH host key), and Codex auth backups. A database dump without files, or files without metadata, is incomplete. Store backups separately and protect their secrets. [Restore guide](docs/RESTORE.md).
 
 ```bash
 # Check every stored document version against its SHA-256 checksum.
@@ -256,7 +287,7 @@ docker compose -f docker-compose.yml ps
 docker compose -f docker-compose.yml logs --tail=100 app
 ```
 
-`scripts/backup_dev.py` is specifically for the **local source-build development stack** (`compose.yaml` + `compose.dev.yaml`) and stops the app/gateway briefly. It is not an external-MariaDB backup tool. Pause scanner writers during coordinated backups.
+`scripts/backup_dev.py` is specifically for the **local source-build development stack** (`compose.yaml` + `compose.dev.yaml`) and stops the app, scanner and gateway briefly while keeping the NAS helper available. It is not an external-MariaDB backup tool. It archives the active storage roots, storage configuration and scanner host key. Pause any direct folder/NAS writers during coordinated backups.
 
 ## Development and validation
 
@@ -265,6 +296,8 @@ docker compose -f docker-compose.yml logs --tail=100 app
 python3 scripts/init_env.py  # fresh checkout only; existing .env is preserved
 mkdir -p consume
 sudo chown 10001:10001 consume
+# One-time preparation for mount propagation from the NAS manager:
+sudo python3 scripts/prepare_storage.py /srv/dms-system/nas
 docker compose -f compose.yaml -f compose.dev.yaml up -d --build
 
 # Isolated SQLite tests; real tenant data is untouched.
@@ -275,6 +308,6 @@ docker run --rm --entrypoint python -v "$PWD:/app:ro" \
 python3 scripts/backup_dev.py /srv/backups/dms-YYYY-MM-DD
 ```
 
-The test suite covers tenant separation, OCR, versions, access lists, review decisions, MFA, scanner cleanup, encrypted restore, AI consent/minimization, whole-document fallback gates, bulk atomicity, contracts, share revocation/passwords/version pinning, annotations, note ownership and mocked external integrations. CI additionally uses MariaDB 11.4. External MariaDB/NAS, actual identity providers, mail/calendars and live AI accounts need validation against the intended deployment.
+The test suite covers tenant separation, OCR, versions, access lists, review decisions, MFA, scanner cleanup, genuine SFTP/passive FTP uploads, interrupted/rotated credentials, NAS fail-closed behavior, verified migration, encrypted restore, AI consent/minimization, whole-document fallback gates, bulk atomicity, contracts, share revocation/passwords/version pinning, annotations, note ownership and mocked external integrations. CI additionally uses MariaDB 11.4. External MariaDB/NAS, actual identity providers, mail/calendars and live AI accounts need validation against the intended deployment.
 
 This implementation targets one application container rather than a horizontally scaled cluster. Search uses SQL substring matching, without a dedicated index or semantic search. It does not implement WORM storage, tamper-proof audit archives, retention automation, email password reset, office previews, antivirus quarantine, automatic camera perspective correction or realtime notifications. Original retention and an activity log alone do not constitute a legal compliance/revision-safety guarantee.

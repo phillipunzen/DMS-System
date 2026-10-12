@@ -26,7 +26,10 @@ STATIC = Path(__file__).parent / 'static'
 @asynccontextmanager
 async def lifespan(app):
     # Schema migration is performed by the container entrypoint, not each API process.
-    ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        ROOT.mkdir(parents=True, exist_ok=True)
+    except HTTPException:
+        pass  # Keep administration reachable when NAS is unavailable.
     with SessionLocal() as db:
         if not db.scalar(select(User.id).where(User.admin.is_(True))):
             email = os.getenv('BOOTSTRAP_ADMIN_EMAIL')
@@ -637,7 +640,7 @@ def integrations(tenant_id: str, user=Depends(current_user), db=Depends(get_db))
     membership(db, user, tenant_id, 'owner')
     from .folder_import import public_paths, current_errors
     result = []
-    for i in db.scalars(select(Integration).where(Integration.tenant_id == tenant_id)):
+    for i in db.scalars(select(Integration).where(Integration.tenant_id == tenant_id, Integration.kind != 'scanner')):
         config = decrypt(i.config_encrypted)
         result.append({'kind': i.kind, 'enabled': i.enabled, 'config': {k: ('••••••••' if k in {'password', 'api_key'} and v else v) for k, v in config.items()}, 'last_run': i.last_run, 'last_status': i.last_status})
         if i.kind == 'folder':
@@ -698,7 +701,8 @@ def run_integration(tenant_id: str, kind: str, user=Depends(current_user), db=De
 @app.get('/api/admin')
 def admin_dashboard(user=Depends(admin_user), db=Depends(get_db)):
     tenants = db.scalars(select(Tenant).order_by(Tenant.created_at.desc())).all()
-    return {'settings': {'app_name': setting(db, 'app_name', 'Archivraum'), 'registration_enabled': setting(db, 'registration_enabled', 'false') == 'true', 'tenant_creation_enabled': setting(db, 'tenant_creation_enabled', 'true') == 'true', 'ai_external_blocked': setting(db, 'ai_external_blocked', 'false') == 'true'}, 'tenants': [{'id': t.id, 'name': t.name, 'quota_mb': t.quota_mb, 'members': db.scalar(select(func.count()).select_from(Membership).where(Membership.tenant_id == t.id)), 'bytes': used_bytes(db, t.id)} for t in tenants], 'users': [user_data(u) | {'active': u.active} for u in db.scalars(select(User).order_by(User.created_at.desc()))], 'domains': [{'host': d.host, 'tenant_id': d.tenant_id} for d in db.scalars(select(Domain))], 'system': {'database': engine.dialect.name, 'storage': str(ROOT), 'storage_writable': os.access(ROOT, os.W_OK), 'max_upload_mb': MAX_UPLOAD // 1024 // 1024, 'cookie_secure': COOKIE_SECURE}}
+    from .storage_control import storage_summary
+    return {'settings': {'app_name': setting(db, 'app_name', 'Archivraum'), 'registration_enabled': setting(db, 'registration_enabled', 'false') == 'true', 'tenant_creation_enabled': setting(db, 'tenant_creation_enabled', 'true') == 'true', 'ai_external_blocked': setting(db, 'ai_external_blocked', 'false') == 'true'}, 'tenants': [{'id': t.id, 'name': t.name, 'quota_mb': t.quota_mb, 'members': db.scalar(select(func.count()).select_from(Membership).where(Membership.tenant_id == t.id)), 'bytes': used_bytes(db, t.id)} for t in tenants], 'users': [user_data(u) | {'active': u.active} for u in db.scalars(select(User).order_by(User.created_at.desc()))], 'domains': [{'host': d.host, 'tenant_id': d.tenant_id} for d in db.scalars(select(Domain))], 'system': {'database': engine.dialect.name, **storage_summary(), 'max_upload_mb': MAX_UPLOAD // 1024 // 1024, 'cookie_secure': COOKIE_SECURE}}
 
 
 @app.put('/api/admin/settings')
@@ -899,3 +903,8 @@ app.include_router(features_router)
 app.include_router(backup_router)
 from .workspace_tools import router as workspace_router
 app.include_router(workspace_router)
+
+from .storage_api import router as storage_router
+app.include_router(storage_router)
+from .storage_control import StorageGateMiddleware
+app.add_middleware(StorageGateMiddleware)

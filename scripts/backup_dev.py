@@ -25,17 +25,23 @@ if dest.is_relative_to(ROOT):
     parser.error('Backup außerhalb des Projekts speichern.')
 dest.mkdir(parents=True, exist_ok=False, mode=0o700)
 started = False
+scanner_present = bool(subprocess.check_output(COMPOSE + ['ps', '-aq', 'scanner'], cwd=ROOT, text=True).strip())
+restart_ids = [subprocess.check_output(COMPOSE + ['ps', '-aq', name], cwd=ROOT, text=True).strip() for name in ['codex', 'app'] + (['scanner'] if scanner_present else [])]
+restart_ids = [container_id for container_id in restart_ids if container_id]
 try:
-    command(COMPOSE + ['stop', 'app', 'codex'], stdout=subprocess.DEVNULL)
+    command(COMPOSE + ['stop', 'app', 'codex'] + (['scanner'] if scanner_present else []), stdout=subprocess.DEVNULL)
     started = True
     with (dest / 'database.sql').open('wb') as output:
         command(COMPOSE + ['exec', '-T', 'db', 'sh', '-c', 'MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump -uroot --single-transaction --routines --triggers dms'], stdout=output)
     with (dest / 'documents.tar').open('wb') as output:
-        command(COMPOSE + ['run', '--rm', '--no-deps', '--entrypoint', 'tar', 'app', '-C', '/data/documents', '-cf', '-', '.'], stdout=output)
+        command(COMPOSE + ['run', '--rm', '--no-deps', '--entrypoint', 'python', 'app', '-c', "from app.storage_control import root;import subprocess;subprocess.run(['tar','-C',str(root('documents')),'-cf','-','.'],check=True)"], stdout=output)
     with (dest / 'consume.tar').open('wb') as output:
-        command(COMPOSE + ['run', '--rm', '--no-deps', '--entrypoint', 'tar', 'app', '-C', '/data/consume', '-cf', '-', '.'], stdout=output)
+        command(COMPOSE + ['run', '--rm', '--no-deps', '--entrypoint', 'python', 'app', '-c', "from app.storage_control import root;import subprocess;subprocess.run(['tar','-C',str(root('consume')),'-cf','-','.'],check=True)"], stdout=output)
     with (dest / 'codex_auth.tar').open('wb') as output:
         command(COMPOSE + ['run', '--rm', '--no-deps', '--entrypoint', 'tar', 'codex', '-C', '/data/codex', '-cf', '-', '.'], stdout=output)
+    for name, mount in [('storage_state', '/data/storage-state'), ('scanner_state', '/data/scanner')]:
+        with (dest / (name + '.tar')).open('wb') as output:
+            command(COMPOSE + ['run', '--rm', '--no-deps', '--entrypoint', 'tar', 'app', '-C', mount, '-cf', '-', '.'], stdout=output)
     # SECRET_KEY is necessary to decrypt saved integration credentials on restore.
     with tarfile.open(dest / 'configuration.tar', 'w') as archive:
         for name in ['.env', 'compose.yaml', 'compose.dev.yaml', 'requirements.lock']:
@@ -51,4 +57,4 @@ try:
     print(f'Backup erstellt: {dest}')
 finally:
     if started:
-        command(COMPOSE + ['start', 'codex', 'app'], stdout=subprocess.DEVNULL)
+        command(['docker', 'start'] + restart_ids, stdout=subprocess.DEVNULL)

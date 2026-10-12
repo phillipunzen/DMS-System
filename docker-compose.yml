@@ -14,6 +14,8 @@ services:
     pull_policy: always
     restart: unless-stopped
     depends_on:
+      storage:
+        condition: service_healthy
       codex:
         condition: service_healthy
     environment:
@@ -34,6 +36,12 @@ services:
       MAX_TENANT_BACKUP_MB: ${MAX_TENANT_BACKUP_MB:-250}
       STORAGE_ROOT: /data/documents
       CONSUME_ROOT: /data/consume
+      STORAGE_SERVICE_URL: http://storage:8002
+      STORAGE_SERVICE_TOKEN: ${STORAGE_SERVICE_TOKEN:?Generate STORAGE_SERVICE_TOKEN in .env first}
+      NAS_MOUNT_PATH: ${NAS_MOUNT_PATH:-/srv/dms-system/nas}
+      SCANNER_PUBLIC_HOST: ${SCANNER_PUBLIC_HOST:-}
+      SFTP_PORT: ${SFTP_PORT:-2222}
+      FTP_PORT: ${FTP_PORT:-2121}
       CONSUME_HOST_PATH: ${CONSUME_PATH:-./consume}
       CODEX_SERVICE_URL: http://codex:8001
       # Internal shared secret, NOT an OpenAI API key. Use >=32 random characters.
@@ -42,10 +50,17 @@ services:
       # Use 127.0.0.1 for a host reverse proxy; 0.0.0.0 for direct LAN testing.
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8120}:8000"
     volumes:
-      # Named volume by default. For NAS use a pre-mounted absolute host path.
+      # Local starting storage; configure SMB/NFS centrally in the web UI.
       # Never point document storage and scanner input at the same directory.
       - ${DOCUMENTS_PATH:-documents}:/data/documents
       - ${CONSUME_PATH:-./consume}:/data/consume
+      - storage_state:/data/storage-state
+      - scanner_state:/data/scanner:ro
+      - type: bind
+        source: ${NAS_MOUNT_PATH:-/srv/dms-system/nas}
+        target: /data/nas
+        bind:
+          propagation: rslave
     networks: [default, codex_private]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
@@ -57,6 +72,80 @@ services:
     cap_drop: [ALL]
     tmpfs:
       - /tmp:size=1G,mode=1777
+  storage:
+    image: ghcr.io/phillipunzen/dms-system:${IMAGE_TAG:-latest}
+    pull_policy: always
+    # Mount capability belongs only to this helper, never the DMS or scanner.
+    user: "0:0"
+    entrypoint: ["/usr/bin/tini", "--", "python", "-m", "uvicorn", "storage_service.server:app", "--host", "0.0.0.0", "--port", "8002", "--no-access-log"]
+    restart: unless-stopped
+    environment:
+      STORAGE_SERVICE_TOKEN: ${STORAGE_SERVICE_TOKEN:?Generate STORAGE_SERVICE_TOKEN in .env first}
+      STORAGE_SERVICE_URL: http://storage:8002
+    volumes:
+      - ${DOCUMENTS_PATH:-documents}:/data/documents
+      - ${CONSUME_PATH:-./consume}:/data/consume
+      - storage_state:/data/storage-state
+      - type: bind
+        source: ${NAS_MOUNT_PATH:-/srv/dms-system/nas}
+        target: /data/nas
+        bind:
+          propagation: rshared
+    networks: [default]
+    cap_drop: [ALL]
+    cap_add: [SYS_ADMIN, DAC_OVERRIDE, CHOWN, SETUID, SETGID, FOWNER]
+    security_opt: [no-new-privileges:true, apparmor:unconfined]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,mode=1777
+      - /run:size=16M,mode=755
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+  scanner:
+    image: ghcr.io/phillipunzen/dms-system:${IMAGE_TAG:-latest}
+    pull_policy: always
+    entrypoint: ["/usr/bin/tini", "--", "python", "-m", "app.scanner_service"]
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      SECRET_KEY: ${SECRET_KEY:?Generate SECRET_KEY in .env first}
+      STORAGE_SERVICE_URL: http://storage:8002
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+      SCANNER_PUBLIC_HOST: ${SCANNER_PUBLIC_HOST:-}
+      FTP_PASV_ADDRESS: ${FTP_PASV_ADDRESS:-}
+      FTP_PASSIVE_MIN: 30000
+      FTP_PASSIVE_MAX: 30009
+    ports:
+      - "${SCANNER_BIND:-0.0.0.0}:${SFTP_PORT:-2222}:2222"
+      # Optional FTP accounts remain disabled until a tenant owner selects FTP.
+      # Firewall these LAN-only ports if FTP is not needed.
+      - "${SCANNER_BIND:-0.0.0.0}:${FTP_PORT:-2121}:2121"
+      - "${SCANNER_BIND:-0.0.0.0}:30000-30009:30000-30009"
+    volumes:
+      - ${CONSUME_PATH:-./consume}:/data/consume
+      - storage_state:/data/storage-state
+      - scanner_state:/data/scanner
+      - type: bind
+        source: ${NAS_MOUNT_PATH:-/srv/dms-system/nas}
+        target: /data/nas
+        bind:
+          propagation: rslave
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:size=64M,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,time;from pathlib import Path;assert time.time()-json.loads(Path('/data/scanner/status.json').read_text())['heartbeat']<45"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
   codex:
     image: ghcr.io/phillipunzen/dms-system-codex:${IMAGE_TAG:-latest}
     pull_policy: always
@@ -87,3 +176,5 @@ networks:
 volumes:
   documents:
   codex_auth:
+  storage_state:
+  scanner_state:
