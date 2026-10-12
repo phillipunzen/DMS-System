@@ -40,6 +40,21 @@ def folder_access(db, user, tenant_id, folder_id, edit=False):
     return folder
 
 
+def rule_permissions(db, user, tenant_id):
+    """Authorize a rule's entire action before mutating a visible document."""
+    cache = {}
+    def permitted(rule):
+        if rule.id not in cache:
+            try:
+                if rule.folder_id:
+                    folder_access(db, user, tenant_id, rule.folder_id, edit=True)
+                cache[rule.id] = True
+            except HTTPException:
+                cache[rule.id] = False
+        return cache[rule.id]
+    return permitted
+
+
 def used_bytes(db, tenant_id, clause=None):
     filters = [Document.tenant_id == tenant_id]
     if clause is not None:

@@ -11,7 +11,7 @@ A self-hosted, multi-tenant document management system with local OCR, immutable
 - Immutable file versions; restoring an older version creates a new current version. All historical versions count toward storage usage.
 - Optional review/approval workflows per tenant. A different eligible member approves or rejects the current version; document changes invalidate approval and preserve history.
 - Mobile camera imports with local rotation/cropping and up to 20 pages per PDF. Camera-generated PDFs discard EXIF/location metadata.
-- Tenant-specific scanner folders, automatic filing rules, read-only IMAP ingestion and outgoing CalDAV due-date synchronization.
+- Tenant-specific scanner folders, automatic filing and filename rules, read-only IMAP ingestion and outgoing CalDAV due-date synchronization.
 - Local accounts, LDAP/Microsoft AD, OIDC, optional TOTP two-factor authentication and one-use recovery codes.
 - Optional automatic AI metadata extraction through Codex with a ChatGPT subscription or the OpenAI Responses API.
 - Password-encrypted tenant backups and restoration into a separate document space.
@@ -158,6 +158,26 @@ At **Dokument → Versionen**, upload a new original or restore a previous one a
 Enable optional workflows at **Raumeinstellungen → Prüfabläufe**. A different eligible editor with document access decides on the current version; the requester/uploader cannot approve it themselves. Changes supersede pending reviews and reset approval while retaining history. The approval status is an organizational marker, not a download or payment lock.
 
 Set up a TOTP authenticator under **Konto → Zwei-Faktor-Anmeldung**, confirm a valid code and save the ten one-use recovery codes separately. They are shown only when generated. Activation/deactivation revokes existing sessions. The DMS factor also applies to LDAP/OIDC logins for that account.
+
+## Automatic naming and folder rules
+
+Under **Automatische Regeln**, managers/owners can define a condition and either a destination folder, a filename template, or both. **Alle Dokumente** matches every document; other conditions match text, supplier, document type, title or filename (case-insensitive, including the current version's original import name).
+
+Enter templates **without an extension**, for example `{date}_{supplier}_{doc_type}` → `2026-10-12_Example GmbH_Rechnung.pdf`. The dialog offers placeholder buttons and a preview explicitly using sample data.
+
+| Placeholder | Value |
+| --- | --- |
+| `{date}`, `{year}`, `{month}` | UTC import date (`YYYY-MM-DD`), year, month; these are not invoice dates |
+| `{supplier}`, `{doc_type}` | Supplier and document type from OCR/AI or edited metadata |
+| `{original_name}` | Current version's original import filename without its last extension |
+| `{title}` | Document title |
+| `{due_date}` | Invoice due date (`YYYY-MM-DD`) |
+| `{amount}` | Stored amount, without currency |
+| `{id}`, `{version}` | Document ID and current version number |
+
+Rules run after OCR, after successful AI processing/retries and for filenames after metadata edits. **Auf bestehende Dokumente anwenden** applies them to completed active documents you may edit. Lower priorities run first; the first matching folder action and the first usable filename action win independently. Disabled rules are skipped. A naming action with missing metadata waits; a lower-priority fallback may still supply a name. Changing a rule does not immediately rewrite existing documents.
+
+Renaming updates the visible/download filename and records an audit event. Document titles, checksums, original version names and stored content remain intact. Path/control characters in metadata are sanitized, names fit a 255-byte UTF-8 limit, and conflicting active names within a tenant gain the document ID. Templates accept only the documented placeholders, with no code or expressions. Tenant backups include templates and current display names; older backups without these fields still restore.
 
 ## OCR and AI
 

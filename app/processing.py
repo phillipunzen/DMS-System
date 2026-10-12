@@ -7,7 +7,7 @@ from datetime import date
 from datetime import timedelta
 from sqlalchemy import select
 from PIL import Image, ImageSequence
-from .db import Rule, Integration, Audit, Setting, now
+from .db import Rule, Integration, Audit, Setting, DocumentVersion, now
 from .security import decrypt
 from .storage import current_path
 from dms_contracts.metadata import INSTRUCTIONS, SCHEMA, validate_metadata
@@ -52,14 +52,34 @@ def extract_text(doc):
         return '\n\n'.join(run(['tesseract', str(p), 'stdout', '-l', 'deu+eng', '--psm', '3'], 120) for p in images)[:2000000]
 
 
-def classify(db, doc):
+def classify(db, doc, permitted=None, actor_id=None, rename_only=False):
+    from .naming import render_filename
     rules = db.scalars(select(Rule).where(Rule.tenant_id == doc.tenant_id, Rule.enabled.is_(True)).order_by(Rule.priority, Rule.id)).all()
+    fields = {key: str(getattr(doc, key, '') or '').casefold() for key in ['text', 'supplier', 'doc_type', 'title', 'filename']}
+    original = db.scalar(select(DocumentVersion.filename).where(DocumentVersion.document_id == doc.id,
+        DocumentVersion.tenant_id == doc.tenant_id, DocumentVersion.number == doc.current_version)) or ''
+    moved = renamed = changed = False
     for rule in rules:
-        if rule.contains.casefold() in str(getattr(doc, rule.field, '') or '').casefold():
-            changed = doc.folder_id != rule.folder_id
+        if rule.field != 'all' and rule.contains.casefold() not in fields.get(rule.field, '') and not (rule.field == 'filename' and rule.contains.casefold() in original.casefold()):
+            continue
+        if permitted is not None and not permitted(rule):
+            continue
+        if rule.folder_id and not moved and not rename_only:
+            changed |= doc.folder_id != rule.folder_id
             doc.folder_id = rule.folder_id
-            return changed
-    return False
+            moved = True
+        if rule.filename_template and not renamed:
+            filename = render_filename(db, doc, rule.filename_template)
+            if filename:
+                if doc.filename != filename:
+                    db.add(Audit(tenant_id=doc.tenant_id, actor_id=actor_id, action='document.renamed',
+                        detail=(doc.id + ': ' + doc.filename + ' → ' + filename)[:255]))
+                    doc.filename = filename
+                    changed = True
+                renamed = True
+        if renamed and (moved or rename_only):
+            break
+    return changed
 
 
 def basic_metadata(doc):

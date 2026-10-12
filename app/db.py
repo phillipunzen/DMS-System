@@ -119,7 +119,8 @@ class Rule(Base):
     name = mapped_column(String(150), nullable=False)
     field = mapped_column(String(20), nullable=False)
     contains = mapped_column(String(150), nullable=False)
-    folder_id = mapped_column(String(36), ForeignKey('folders.id'), nullable=False)
+    folder_id = mapped_column(String(36), ForeignKey('folders.id'), nullable=True)
+    filename_template = mapped_column(String(255), nullable=True)
     priority = mapped_column(Integer, default=100)
     enabled = mapped_column(Boolean, default=True)
 

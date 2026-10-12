@@ -20,6 +20,7 @@ from sqlalchemy import select
 from .db import *
 from .security import current_user, membership, audit, setting
 from .storage import version_path, path_for, ROOT, ALLOWED
+from .schemas import RuleInput
 
 router = APIRouter()
 MAX_BACKUP = int(os.getenv('MAX_TENANT_BACKUP_MB', '250')) * 1024 * 1024
@@ -50,6 +51,7 @@ class BackupVersion(BaseModel):
 class BackupDocument(BaseModel):
     id: uuid.UUID
     title: str = Field(min_length=1, max_length=255)
+    filename: str | None = Field(default=None, min_length=1, max_length=255)
     folder_id: uuid.UUID | None = None
     current_version: int = Field(ge=1, le=100000)
     restricted: bool = False
@@ -65,13 +67,8 @@ class BackupDocument(BaseModel):
     versions: list[BackupVersion] = Field(min_length=1, max_length=100000)
 
 
-class BackupRule(BaseModel):
-    name: str = Field(min_length=1, max_length=150)
-    field: str = Field(pattern=r'^(text|supplier|doc_type|title|filename)$')
-    contains: str = Field(min_length=1, max_length=150)
-    folder_id: uuid.UUID
-    priority: int
-    enabled: bool = True
+class BackupRule(RuleInput):
+    folder_id: uuid.UUID | None = None
 
 
 class Manifest(BaseModel):
@@ -140,7 +137,7 @@ def export_tenant(tenant_id: str, data: BackupInput, user=Depends(current_user),
         folder_rows = db.scalars(select(Folder).where(Folder.tenant_id == tenant_id)).all()
         payload = {'format': 'archivraum-tenant-v1', 'name': tenant.name, 'workflow_enabled': tenant.workflow_enabled,
             'folders': [{k: getattr(f, k) for k in ['id', 'name', 'color', 'restricted']} for f in folder_rows], 'documents': [],
-            'rules': [{k: getattr(r, k) for k in ['name', 'field', 'contains', 'folder_id', 'priority', 'enabled']} for r in db.scalars(select(Rule).where(Rule.tenant_id == tenant_id))],
+            'rules': [{k: getattr(r, k) for k in ['name', 'field', 'contains', 'folder_id', 'filename_template', 'priority', 'enabled']} for r in db.scalars(select(Rule).where(Rule.tenant_id == tenant_id))],
             'access_lists': {'folders': {}, 'documents': {}}, 'reviews': []}
         for model, scope, parent, rows in [(FolderGrant, 'folders', 'folder_id', folder_rows), (DocumentGrant, 'documents', 'document_id', docs)]:
             for item in rows:
@@ -149,7 +146,7 @@ def export_tenant(tenant_id: str, data: BackupInput, user=Depends(current_user),
         total = 0
         with zipfile.ZipFile(directory / 'archive.zip', 'w', compression=zipfile.ZIP_DEFLATED) as archive:
             for doc in docs:
-                item = {k: getattr(doc, k) for k in ['id', 'title', 'folder_id', 'current_version', 'restricted', 'text', 'supplier', 'doc_type', 'tags', 'amount', 'due_date', 'paid', 'deleted_at', 'created_at']}
+                item = {k: getattr(doc, k) for k in ['id', 'title', 'filename', 'folder_id', 'current_version', 'restricted', 'text', 'supplier', 'doc_type', 'tags', 'amount', 'due_date', 'paid', 'deleted_at', 'created_at']}
                 versions = db.scalars(select(DocumentVersion).where(DocumentVersion.document_id == doc.id).order_by(DocumentVersion.number)).all()
                 item['versions'] = []
                 if not versions: raise ValueError('Missing version')
@@ -226,7 +223,7 @@ def restore_tenant(file: UploadFile = File(...), password: str = Form(min_length
                     if len(set(numbers)) != len(numbers) or sorted(numbers) != list(range(1, max(numbers) + 1)) or imported.current_version != max(numbers): raise ValueError('Versions')
                     current = next(v for v in imported.versions if v.number == imported.current_version)
                     doc = Document(id=uid(), tenant_id=tenant.id, uploader_id=user.id, folder_id=mapping.get(str(imported.folder_id)), title=imported.title,
-                        filename=current.filename, mime=current.mime, size=current.size, sha256=current.sha256, current_version=imported.current_version,
+                        filename=imported.filename or current.filename, mime=current.mime, size=current.size, sha256=current.sha256, current_version=imported.current_version,
                         text=imported.text, supplier=imported.supplier, doc_type=imported.doc_type, tags=imported.tags,
                         amount=imported.amount, due_date=imported.due_date, paid=imported.paid, restricted=imported.restricted,
                         status='ready', source='restore', created_at=imported.created_at.replace(tzinfo=None), deleted_at=imported.deleted_at.replace(tzinfo=None) if imported.deleted_at else None,
@@ -251,8 +248,8 @@ def restore_tenant(file: UploadFile = File(...), password: str = Form(min_length
                         if written != v.size or checksum.hexdigest() != v.sha256: raise ValueError('Checksum')
                         db.add(DocumentVersion(tenant_id=tenant.id, document_id=doc.id, number=v.number, filename=v.filename, mime=v.mime, size=v.size, sha256=v.sha256, uploader_id=user.id, note=v.note, created_at=v.created_at.replace(tzinfo=None)))
                 for rule in manifest.rules:
-                    if str(rule.folder_id) not in mapping: raise ValueError('Rule folder')
-                    db.add(Rule(tenant_id=tenant.id, name=rule.name, field=rule.field, contains=rule.contains, folder_id=mapping[str(rule.folder_id)], priority=rule.priority, enabled=rule.enabled))
+                    if rule.folder_id and str(rule.folder_id) not in mapping: raise ValueError('Rule folder')
+                    db.add(Rule(tenant_id=tenant.id, name=rule.name, field=rule.field, contains=rule.contains, folder_id=mapping.get(str(rule.folder_id)), filename_template=rule.filename_template, priority=rule.priority, enabled=rule.enabled))
                 # Preserve archived access and review details for the owner's inspection.
                 # Never auto-enrol former users, import secrets or queue cloud processing.
                 db.add(Setting(key='restore-history:' + tenant.id, value=json.dumps({'access_lists': manifest.access_lists, 'reviews': manifest.reviews}, ensure_ascii=False)))

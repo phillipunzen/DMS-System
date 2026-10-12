@@ -18,7 +18,7 @@ from .db import *
 from .security import *
 from .schemas import *
 from .storage import save_document, path_for, current_path, ROOT, MAX_UPLOAD
-from .permissions import document_access, folder_access, document_clause, folder_clause, used_bytes
+from .permissions import document_access, folder_access, document_clause, folder_clause, used_bytes, rule_permissions
 
 STATIC = Path(__file__).parent / 'static'
 
@@ -345,6 +345,8 @@ def edit_document(tenant_id: str, document_id: str, data: DocInput, user=Depends
         raise HTTPException(422, 'Tags dürfen höchstens 80 Zeichen enthalten.')
     for key, value in data.model_dump().items():
         setattr(doc, key, value)
+    from .processing import classify
+    classify(db, doc, permitted=rule_permissions(db, user, tenant_id), actor_id=user.id, rename_only=True)
     from .features import invalidate_review
     invalidate_review(db, doc)
     audit(db, user, tenant_id, 'document.updated', doc.id)
@@ -470,18 +472,18 @@ def stats(tenant_id: str, user=Depends(current_user), db=Depends(get_db)):
 
 @app.get('/api/tenants/{tenant_id}/rules')
 def rules(tenant_id: str, user=Depends(current_user), db=Depends(get_db)):
-    membership(db, user, tenant_id)
     member = membership(db, user, tenant_id)
-    query = select(Rule).join(Folder, Rule.folder_id == Folder.id).where(Rule.tenant_id == tenant_id)
+    query = select(Rule).outerjoin(Folder, Rule.folder_id == Folder.id).where(Rule.tenant_id == tenant_id)
     if member.role != 'owner':
-        query = query.where(folder_clause(user.id))
-    return [{key: getattr(r, key) for key in ['id', 'name', 'field', 'contains', 'folder_id', 'priority', 'enabled']} for r in db.scalars(query.order_by(Rule.priority, Rule.id))]
+        query = query.where(or_(Rule.folder_id.is_(None), folder_clause(user.id)))
+    return [{key: getattr(r, key) for key in ['id', 'name', 'field', 'contains', 'folder_id', 'filename_template', 'priority', 'enabled']} for r in db.scalars(query.order_by(Rule.priority, Rule.id))]
 
 
 @app.post('/api/tenants/{tenant_id}/rules')
 def add_rule(tenant_id: str, data: RuleInput, user=Depends(current_user), db=Depends(get_db)):
     membership(db, user, tenant_id, 'manager')
-    folder_access(db, user, tenant_id, data.folder_id, edit=True)
+    if data.folder_id:
+        folder_access(db, user, tenant_id, data.folder_id, edit=True)
     rule = Rule(tenant_id=tenant_id, **data.model_dump())
     db.add(rule)
     audit(db, user, tenant_id, 'rule.created', data.name)
@@ -492,11 +494,13 @@ def add_rule(tenant_id: str, data: RuleInput, user=Depends(current_user), db=Dep
 @app.put('/api/tenants/{tenant_id}/rules/{rule_id}')
 def update_rule(tenant_id: str, rule_id: str, data: RuleInput, user=Depends(current_user), db=Depends(get_db)):
     membership(db, user, tenant_id, 'manager')
-    folder_access(db, user, tenant_id, data.folder_id, edit=True)
+    if data.folder_id:
+        folder_access(db, user, tenant_id, data.folder_id, edit=True)
     rule = db.scalar(select(Rule).where(Rule.id == rule_id, Rule.tenant_id == tenant_id))
     if not rule:
         raise HTTPException(404, 'Regel nicht gefunden.')
-    folder_access(db, user, tenant_id, rule.folder_id, edit=True)
+    if rule.folder_id:
+        folder_access(db, user, tenant_id, rule.folder_id, edit=True)
     for key, value in data.model_dump().items():
         setattr(rule, key, value)
     audit(db, user, tenant_id, 'rule.updated', rule.name)
@@ -510,7 +514,8 @@ def remove_rule(tenant_id: str, rule_id: str, user=Depends(current_user), db=Dep
     rule = db.scalar(select(Rule).where(Rule.id == rule_id, Rule.tenant_id == tenant_id))
     if not rule:
         raise HTTPException(404, 'Regel nicht gefunden.')
-    folder_access(db, user, tenant_id, rule.folder_id, edit=True)
+    if rule.folder_id:
+        folder_access(db, user, tenant_id, rule.folder_id, edit=True)
     db.delete(rule)
     audit(db, user, tenant_id, 'rule.deleted', rule.name)
     db.commit()
@@ -522,18 +527,11 @@ def apply_rules(tenant_id: str, user=Depends(current_user), db=Depends(get_db)):
     from .processing import classify
     membership(db, user, tenant_id, 'manager')
     member = membership(db, user, tenant_id)
-    docs = db.scalars(select(Document).where(Document.tenant_id == tenant_id, Document.deleted_at.is_(None), Document.status.notin_(['processing', 'queued']), document_clause(user.id, member.role, True))).all()
+    docs = db.scalars(select(Document).where(Document.tenant_id == tenant_id, Document.deleted_at.is_(None), Document.status.notin_(['processing', 'queued']), document_clause(user.id, member.role, True)).order_by(Document.id).with_for_update()).all()
     changed = 0
+    permitted = rule_permissions(db, user, tenant_id)
     for doc in docs:
-        previous = doc.folder_id
-        matched = classify(db, doc)
-        if matched and doc.folder_id:
-            try:
-                folder_access(db, user, tenant_id, doc.folder_id, edit=True)
-            except HTTPException:
-                doc.folder_id = previous
-                continue
-        changed += int(matched)
+        changed += int(classify(db, doc, permitted=permitted, actor_id=user.id))
     audit(db, user, tenant_id, 'rules.applied', str(changed))
     db.commit()
     return {'changed': changed}

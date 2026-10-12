@@ -1,6 +1,7 @@
 from datetime import date
 from typing import Literal
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator
+from .naming import validate_template
 
 Role = Literal['viewer', 'editor', 'manager', 'owner']
 class LoginInput(BaseModel):
@@ -27,11 +28,27 @@ class DocInput(BaseModel):
     paid: bool = False
 class RuleInput(BaseModel):
     name: str = Field(min_length=1, max_length=150)
-    field: Literal['text', 'supplier', 'doc_type', 'title', 'filename']
-    contains: str = Field(min_length=1, max_length=150)
-    folder_id: str
+    field: Literal['all', 'text', 'supplier', 'doc_type', 'title', 'filename']
+    contains: str = Field(default='', max_length=150)
+    folder_id: str | None = None
+    filename_template: str | None = Field(default=None, max_length=255)
     priority: int = Field(default=100, ge=0, le=9999)
     enabled: bool = True
+
+    @field_validator('filename_template')
+    @classmethod
+    def valid_template(cls, value):
+        return validate_template(value)
+
+    @model_validator(mode='after')
+    def valid_rule(self):
+        self.contains = self.contains.strip() if self.field != 'all' else ''
+        self.folder_id = self.folder_id or None
+        if self.field != 'all' and not self.contains:
+            raise ValueError('Geben Sie einen Suchtext für die Bedingung ein.')
+        if not self.folder_id and not self.filename_template:
+            raise ValueError('Wählen Sie einen Zielordner oder geben Sie eine Namensvorlage ein.')
+        return self
 class InviteInput(BaseModel):
     email: EmailStr
     role: Literal['viewer', 'editor', 'manager']

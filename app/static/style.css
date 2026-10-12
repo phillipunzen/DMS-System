@@ -508,6 +508,16 @@ dialog::backdrop { background: #0a153780; backdrop-filter: blur(5px); }
 .camera-crop label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
 .camera-crop input { width: 100%; accent-color: var(--green); }
 .settings-card form > p { margin: 14px 0; font-size: 12px; }
+.rule-template { display: flex; align-items: start; gap: 8px; flex-wrap: wrap; }
+.rule-template code { color: var(--green); background: var(--green-soft); padding: 4px 8px; border-radius: 6px; overflow-wrap: anywhere; }
+.name-placeholders { display: flex; gap: 7px; flex-wrap: wrap; margin: -6px 0 18px; }
+.name-placeholder { border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); padding: 7px 9px; border-radius: 8px; font-size: 11px; cursor: pointer; }
+.name-placeholder:hover { color: var(--green); border-color: var(--green); }
+.name-placeholder code { color: var(--green); }
+.name-preview { padding: 16px; background: var(--green-soft); border-radius: 10px; margin: 18px 0 12px; }
+.name-preview > span { display: block; font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+.name-preview output { color: var(--green); font-size: 13px; overflow-wrap: anywhere; }
+.name-help { font-size: 12px; color: var(--muted); line-height: 1.7; margin-bottom: 20px; }
 .codex-usage { margin: 22px 0; padding: 18px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; }
 .codex-usage h3 { margin: 0; font-size: 15px; }
 .codex-usage > p, .codex-usage small, .codex-credits { color: var(--muted); font-size: 12px; line-height: 1.6; }
