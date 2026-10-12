@@ -110,6 +110,7 @@ class Document(Base):
     ai_pending = mapped_column(Boolean, default=False, nullable=False)
     ai_retry_at = mapped_column(Timestamp, nullable=True)
     ai_attempts = mapped_column(Integer, default=0, nullable=False)
+    ocr_failed = mapped_column(Boolean, default=False, nullable=False)
 
 
 class Rule(Base):
@@ -277,3 +278,53 @@ class MFAChallenge(Base):
     user_id = mapped_column(String(36), ForeignKey('users.id'), nullable=False)
     expires_at = mapped_column(Timestamp, nullable=False)
     attempts = mapped_column(Integer, default=0, nullable=False)
+
+
+class Contract(Base):
+    __tablename__ = 'contracts'
+    document_id = mapped_column(String(36), ForeignKey('documents.id'), primary_key=True)
+    partner = mapped_column(String(150), default='', nullable=False)
+    start_date = mapped_column(Date, nullable=True)
+    end_date = mapped_column(Date, nullable=False, index=True)
+    notice_days = mapped_column(Integer, default=30, nullable=False)
+    reminder_days = mapped_column(Integer, default=30, nullable=False)
+    status = mapped_column(String(20), default='active', nullable=False)
+    note = mapped_column(String(2000), default='', nullable=False)
+
+
+class DocumentNote(Base):
+    __tablename__ = 'document_notes'
+    id = mapped_column(String(36), primary_key=True, default=uid)
+    document_id = mapped_column(String(36), ForeignKey('documents.id'), nullable=False, index=True)
+    author_id = mapped_column(String(36), ForeignKey('users.id'), nullable=False)
+    body = mapped_column(String(4000), nullable=False)
+    created_at = mapped_column(Timestamp, default=now, nullable=False)
+    updated_at = mapped_column(Timestamp, default=now, nullable=False)
+
+
+class Annotation(Base):
+    __tablename__ = 'annotations'
+    id = mapped_column(String(36), primary_key=True, default=uid)
+    document_id = mapped_column(String(36), ForeignKey('documents.id'), nullable=False, index=True)
+    author_id = mapped_column(String(36), ForeignKey('users.id'), nullable=False)
+    version = mapped_column(Integer, nullable=False)
+    page = mapped_column(Integer, nullable=False)
+    rect = mapped_column(JSON, nullable=False)
+    color = mapped_column(String(20), default='yellow', nullable=False)
+    body = mapped_column(String(1000), default='', nullable=False)
+    created_at = mapped_column(Timestamp, default=now, nullable=False)
+
+
+class ShareLink(Base):
+    __tablename__ = 'share_links'
+    id = mapped_column(String(36), primary_key=True, default=uid)
+    document_id = mapped_column(String(36), ForeignKey('documents.id'), nullable=False, index=True)
+    creator_id = mapped_column(String(36), ForeignKey('users.id'), nullable=False)
+    token_hash = mapped_column(String(64), unique=True, nullable=False)
+    password_hash = mapped_column(Text, nullable=True)
+    version = mapped_column(Integer, nullable=False)
+    filename = mapped_column(String(255), nullable=False)
+    expires_at = mapped_column(Timestamp, nullable=False)
+    revoked_at = mapped_column(Timestamp, nullable=True)
+    created_at = mapped_column(Timestamp, default=now, nullable=False)
+    downloads = mapped_column(Integer, default=0, nullable=False)

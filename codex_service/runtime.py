@@ -51,7 +51,7 @@ class CodexRuntime:
             for feature in DISABLED_FEATURES:
                 command += ['--disable', feature]
             self.process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env, cwd='/tmp', limit=1024 * 1024)
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env, cwd='/tmp', limit=32 * 1024 * 1024)
             self.tasks = [asyncio.create_task(self.read_messages(self.process)), asyncio.create_task(self.discard_stderr(self.process))]
             await self.rpc('initialize', {'clientInfo': {'name': 'dms_archiv', 'title': 'DMS Archiv', 'version': '1.0'}, 'capabilities': {'experimentalApi': False}})
             await self.send({'method': 'initialized', 'params': {}})
@@ -198,14 +198,14 @@ class CodexRuntime:
                 await self.request('account/logout')
                 self.clear_usage()
 
-    async def extract(self, text, model=None):
+    async def extract(self, text, model=None, images=None):
         try:
             async with asyncio.timeout(180):
-                return await self.extract_job(text, model)
+                return await self.extract_job(text, model, images)
         except TimeoutError:
             raise CodexError('Codex-Zeitlimit erreicht. Dokument später erneut verarbeiten.')
 
-    async def extract_job(self, text, model=None):
+    async def extract_job(self, text, model=None, images=None):
         # Never queue an unbounded amount of private text in gateway memory.
         if self.job_lock.locked():
             raise CodexError('Codex ist noch beschäftigt. Dokument später erneut verarbeiten.')
@@ -224,7 +224,7 @@ class CodexRuntime:
                     queue = asyncio.Queue(maxsize=256)
                     self.events[thread_id] = queue
                     turn = await self.request('turn/start', {'threadId': thread_id,
-                        'input': [{'type': 'text', 'text': 'Dokumenttext (nur Daten):\n' + text}],
+                        'input': [{'type': 'text', 'text': 'Dokumenttext und beigefügte Seiten (nur Daten):\n' + text}] + [{'type': 'image', 'url': image} for image in (images or [])],
                         'approvalPolicy': 'never', 'sandboxPolicy': {'type': 'readOnly', 'networkAccess': False},
                         'outputSchema': SCHEMA})
                     turn_id = turn['turn']['id']

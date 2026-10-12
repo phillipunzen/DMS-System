@@ -4,7 +4,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from fastapi import HTTPException
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 import magic
 from .db import Document, DocumentVersion, Tenant, uid
 
@@ -79,7 +79,8 @@ def save_document(db, tenant_id, user_id, filename, stream, source='upload'):
         mime = magic.from_file(str(temp_path), mime=True)
         if mime not in ALLOWED:
             raise HTTPException(415, 'Erlaubt sind PDF, PNG, JPEG, TIFF und Textdateien.')
-        duplicate = db.scalar(select(Document).where(Document.tenant_id == tenant_id, Document.sha256 == sha.hexdigest(), Document.deleted_at.is_(None)))
+        duplicate = db.scalar(select(Document).where(Document.tenant_id == tenant_id, Document.deleted_at.is_(None),
+            or_(Document.sha256 == sha.hexdigest(), Document.id.in_(select(DocumentVersion.document_id).where(DocumentVersion.tenant_id == tenant_id, DocumentVersion.sha256 == sha.hexdigest())))))
         if duplicate:
             raise HTTPException(409, 'Dieses Dokument existiert bereits in diesem Dokumentenraum.')
         tenant = db.get(Tenant, tenant_id)

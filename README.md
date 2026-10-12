@@ -14,6 +14,12 @@ A self-hosted, multi-tenant document management system with local OCR, immutable
 - Tenant-specific scanner folders, automatic filing and filename rules, read-only IMAP ingestion and outgoing CalDAV due-date synchronization.
 - Local accounts, LDAP/Microsoft AD, OIDC, optional TOTP two-factor authentication and one-use recovery codes.
 - Optional automatic AI metadata extraction through Codex with a ChatGPT subscription or the OpenAI Responses API.
+- Duplicate prevention including historical versions, and a permission-filtered view of similar OCR texts.
+- Atomic bulk edits: move, replace tags, set type/payment status, trash/restore and reprocess up to 100 documents.
+- Contract terms, cancellation deadlines and in-app reminders.
+- Expiring, revocable, version-pinned external download links with optional passwords.
+- Document notes and version-bound PDF highlights/comments; originals remain unchanged.
+- Server health overview: worker heartbeat, storage, OCR tools, queues, import errors and backup exports.
 - Password-encrypted tenant backups and restoration into a separate document space.
 - Light, dark and blue themes, a configurable PWA manifest and support for multiple domains. Private documents and API responses are never cached for offline use.
 
@@ -179,15 +185,37 @@ Rules run after OCR, after successful AI processing/retries and for filenames af
 
 Renaming updates the visible/download filename and records an audit event. Document titles, checksums, original version names and stored content remain intact. Path/control characters in metadata are sanitized, names fit a 255-byte UTF-8 limit, and conflicting active names within a tenant gain the document ID. Templates accept only the documented placeholders, with no code or expressions. Tenant backups include templates and current display names; older backups without these fields still restore.
 
+## Document workspace tools
+
+**Duplikate:** Upload/scanner imports reject a checksum already present in an active document's current or historical versions within the same tenant. The message does not reveal another document's ID/name. Scanner duplicate sources remain in the input directory. The duplicate view compares only documents the current member can read: up to the latest 200 active documents, at most 100 pairs. Word-set similarity over the first 50,000 OCR characters (minimum 12 distinct words and 100 characters, threshold 85%) is a review hint, not proof of identity. Invoice numbers/amounts are not removed; nothing is automatically merged or deleted.
+
+**Sammelbearbeitung:** On All documents, Inbox or Trash, select documents using the checkboxes and choose **Auswahl bearbeiten**. Tags are replaced, not appended. Folder/document edit permissions and processing states are checked for the entire selection before any changes are saved. A forbidden item rejects the whole batch. Metadata changes reset review status; reprocessing triggers OCR and any enabled automatic AI again.
+
+**Vertrag & Fristen:** Add contract data from the document details. Store partner, optional start, end date, notice period and reminder lead time in calendar days. The cancellation deadline is end date minus notice days; reminders start that many reminder days earlier. Active reminders appear in the contract view and dashboard. They do not renew contracts, cancel anything, send emails or synchronize contract reminders via CalDAV; existing invoice CalDAV remains available.
+
+**Freigabelinks:** Managers/owners with edit access can create a link for the current document version, valid for 1–90 days. Optional passwords require at least 12 characters and are stored as Argon2 hashes. The high-entropy URL token is returned once and only its hash is stored. Password unlocking is rate limited and uses a separate, one-hour HttpOnly cookie. Each access rechecks expiry, revocation, trash status, creator activity, tenant role and current document/folder rights. A new version is never silently exposed by an old link. Downloads include only that version, not internal notes/annotations. Use HTTPS and protect link URLs from proxy access logs; anyone possessing the link (and optional password) can download it. The link is a download authorization, not DRM.
+
+**Notizen / PDF markieren:** Editors with document edit access add notes; only the author or tenant owner can edit/remove them. PDF highlights are rectangles with optional comments and color, stored against a particular version/page. Select historical PDF versions in the markup view. Highlights are displayed over a locally rendered preview and are not embedded in or exported with the original. **They are not redactions.** Notes/annotations follow existing document/folder read permissions and are included in tenant backups.
+
+**Systemzustand:** Server admins see database connectivity, worker heartbeat, OCR availability, filesystem free space, processing/AI queues, scanner import errors and integration status. Storage figures describe the backing filesystem, not just the DMS allocation. The backup timestamp reports the last successful tenant export; external MariaDB/NAS backup jobs and safe storage of downloaded exports are not monitored.
+
 ## OCR and AI
 
-Local OCR, search, basic invoice extraction and filing rules work without an external AI provider. PDF extraction is limited to 100 pages; image-PDF OCR and TIFF processing to 50 pages. Protected/damaged files enter an error state. Originals are not rewritten into OCR PDFs.
+Local OCR, search, basic invoice extraction and filing rules work without an external AI provider. PDF extraction is limited to 100 pages; image-PDF OCR and TIFF processing to 50 pages. Unreadable or textless documents retain their original and show an OCR warning; they can optionally use the whole-document AI fallback described below. Originals are not rewritten into OCR PDFs.
 
 New tenants have AI disabled until the owner configures a provider and consent. The integration dialog offers automatic processing, requiring separate automatic-transfer consent. Existing configurations without that consent remain manual. Manual mode lets the owner edit a minimized preview and explicitly approve the exact text before transmission.
 
-Before either provider is contacted, the server masks recognized email addresses, URLs, common IBAN/phone formats and labeled account/tax/customer identifiers, then limits the OCR excerpt to 1,000–10,000 characters (default 10,000). Original files, filenames and DMS user/tenant identifiers are not included in the AI payload. Pattern masking is **not guaranteed anonymization**: names, addresses, sensitive context or OCR errors may remain. In automatic mode there is no individual preview approval. The server administrator can block all external AI transfers globally.
+For ordinary text-based AI extraction, before either provider is contacted, the server masks recognized email addresses, URLs, common IBAN/phone formats and labeled account/tax/customer identifiers, then limits the OCR excerpt to 1,000–10,000 characters (default 10,000). Original file containers, filenames and DMS user/tenant identifiers are not included in the AI payload. If the whole-document fallback is enabled, complete visible page content is transmitted as images instead of a minimized text excerpt. Pattern masking is **not guaranteed anonymization**: names, addresses, sensitive context or OCR errors may remain. In automatic mode there is no individual preview approval. The server administrator can block all external AI transfers globally.
 
-An AI outage leaves the document and local OCR searchable, with an **AI pending / KI ausstehend** status. Retries back off up to one hour; disabling the integration or globally blocking AI prevents further transfers. AI-derived metadata still requires human verification.
+An AI outage leaves the original accessible and any successful local OCR searchable, with an **AI pending / KI ausstehend** status. Retries back off up to one hour; disabling the integration or globally blocking AI prevents further transfers. AI-derived metadata still requires human verification.
+
+### Whole-document fallback after OCR failure
+
+Under **Integrationen → KI-Metadaten**, enable **Wenn OCR scheitert: sämtliche Dokumentseiten automatisch an die KI übertragen**. This requires automatic mode and both consent controls; existing tenant configurations leave it disabled. It runs automatically when local OCR fails or returns no non-whitespace text. A difficult but nonempty OCR result does not by itself trigger image transfer.
+
+The DMS renders every PDF page or image/TIFF frame locally as a metadata-free JPEG, with a maximum dimension of 2,000 pixels. The complete visible content, including names, signatures and addresses, is sent to the selected provider. **Image content is not automatically redacted.** Original PDF containers, filenames, EXIF metadata and account/tenant identifiers stay local. Limits are 50 pages and 20 MB of generated JPEG data; oversized documents are not silently truncated. An unreadable/encrypted PDF cannot be repaired by this fallback. The selected model must support image inputs.
+
+The gateway uses Codex's [official image input](https://learn.chatgpt.com/docs/app-server#turns); API mode uses [Responses image inputs](https://developers.openai.com/api/docs/guides/images-vision). Whole-document transfers have a separate audit event. Global AI blocking, tenant consent, Codex tenant authorization and disabled integrations apply equally to images and text. The result populates document metadata; it does not create a replacement full-text transcription, so failed local OCR still limits full-text search. Provider outages use the existing retry schedule. Reprocessing restarts local OCR.
 
 ### Codex with a ChatGPT subscription
 
@@ -195,7 +223,7 @@ An AI outage leaves the document and local OCR searchable, with an **AI pending 
 2. Allow the intended tenants to use the connected subscription in the same admin panel.
 3. Under **Integrationen → KI-Metadaten**, select **Codex (ChatGPT-Abonnement)**, activate the integration and explicitly consent to the desired manual/automatic mode.
 
-The gateway uses the official Codex App Server over local stdio, pinned to CLI **0.162.1**. Each document gets a new ephemeral thread, isolated temporary working directory and validated output schema. Shell/tools, browsing, apps, plugins and further agents are disabled. The gateway receives only the minimized text; it cannot access the DMS database or originals. Account access conditions and usage limits apply; there is no automatic paid-API fallback.
+The gateway uses the official Codex App Server over local stdio, pinned to CLI **0.162.1**. Each document gets a new ephemeral thread, isolated temporary working directory and validated output schema. Shell/tools, browsing, apps, plugins and further agents are disabled. The gateway receives minimized text or, when explicitly enabled after OCR failure, inline document page images. It has no DMS database/document-volume mount and cannot read other documents. Account access conditions and usage limits apply; there is no automatic paid-API fallback.
 
 **Account quota display:** Server administrators see the provider-reported remaining/used percentages, window durations, reset times and additional credits (when supplied) in **Serveradministration → Codex**. Values come from the official `account/rateLimits/read` endpoint, refresh approximately every minute and include usage by other Codex clients and all authorized tenants. Missing values remain unknown; a failed quota read does not disconnect the account or block document extraction. These figures are not a document/token allowance. Tenant members cannot access account quota, email or plan details. See the [official rate-limit API](https://learn.chatgpt.com/docs/app-server#rate-limits-tokenscredits).
 
@@ -214,9 +242,9 @@ The alternative integration uses your API key and an API-compatible endpoint sup
 
 ## Backups and restore
 
-Tenant owners can download a password-encrypted `.dmsbackup` under **Raumeinstellungen**. It includes all file versions, OCR text, metadata, folders, rules and archived permissions/reviews. AES-256-GCM provides encryption and integrity protection; Scrypt derives the key. There is no recovery without the password. The default 250 MB limit suits smaller tenant archives.
+Tenant owners can download a password-encrypted `.dmsbackup` under **Raumeinstellungen**. It includes all file versions, OCR text, metadata, folders, rules, contracts, notes, version-bound PDF annotations and archived permissions/reviews. External sharing tokens/passwords are never exported. AES-256-GCM provides encryption and integrity protection; Scrypt derives the key. There is no recovery without the password. The default 250 MB limit suits smaller tenant archives.
 
-Restoration creates a new tenant owned only by the restoring user. Previous users must be reinvited, permissions reapplied and approvals renewed. Archived rights/reviews are available for inspection. Account passwords, MFA secrets and integration credentials are not imported; restoration does not automatically send documents to AI.
+Restoration creates a new tenant owned only by the restoring user. Previous users must be reinvited, permissions reapplied and approvals renewed. Archived rights/reviews and original note/annotation authors are available for inspection. Restored notes and annotations are assigned to the restoring owner, without creating former accounts. External links are not recreated. Account passwords, MFA secrets and integration credentials are not imported; restoration does not automatically send documents to AI.
 
 For full recovery, coordinate MariaDB, document/NAS storage, scanner input, `.env`/`SECRET_KEY` and Codex auth backups. A database dump without files, or files without metadata, is incomplete. Store backups separately and protect their secrets. [Restore guide](docs/RESTORE.md).
 
@@ -247,6 +275,6 @@ docker run --rm --entrypoint python -v "$PWD:/app:ro" \
 python3 scripts/backup_dev.py /srv/backups/dms-YYYY-MM-DD
 ```
 
-The test suite covers tenant separation, OCR, versions, access lists, review decisions, MFA, scanner cleanup, encrypted restore, AI consent/minimization and mocked external integrations. CI additionally uses MariaDB 11.4. External MariaDB/NAS, actual identity providers, mail/calendars and live AI accounts need validation against the intended deployment.
+The test suite covers tenant separation, OCR, versions, access lists, review decisions, MFA, scanner cleanup, encrypted restore, AI consent/minimization, whole-document fallback gates, bulk atomicity, contracts, share revocation/passwords/version pinning, annotations, note ownership and mocked external integrations. CI additionally uses MariaDB 11.4. External MariaDB/NAS, actual identity providers, mail/calendars and live AI accounts need validation against the intended deployment.
 
 This implementation targets one application container rather than a horizontally scaled cluster. Search uses SQL substring matching, without a dedicated index or semantic search. It does not implement WORM storage, tamper-proof audit archives, retention automation, email password reset, office previews, antivirus quarantine, automatic camera perspective correction or realtime notifications. Original retention and an activity log alone do not constitute a legal compliance/revision-safety guarantee.

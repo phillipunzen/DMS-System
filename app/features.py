@@ -85,6 +85,7 @@ def create_version(db, user, tenant_id, document_id, stream, filename, note):
         doc.status, doc.error, doc.text = 'queued', None, ''
         doc.processed_at = None
         doc.ai_pending, doc.ai_retry_at, doc.ai_attempts = False, None, 0
+        doc.ocr_failed = False
         doc.supplier, doc.doc_type, doc.amount, doc.due_date, doc.paid = '', 'Sonstiges', None, None, False
         invalidate_review(db, doc)
         audit(db, user, tenant_id, 'version.created', doc.id + ': v' + str(number))

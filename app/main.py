@@ -73,7 +73,7 @@ async def security_headers(request: Request, call_next):
         origin = request.headers.get('origin')
         if origin and urlparse(origin).netloc.lower() != request.headers.get('host', '').lower():
             return Response('Ungültiger Origin', status_code=403)
-        public = request.url.path in {'/api/auth/login', '/api/auth/register', '/api/invitations/accept'}
+        public = request.url.path in {'/api/auth/login', '/api/auth/register', '/api/invitations/accept'} or bool(re.fullmatch(r'/api/shares/[A-Za-z0-9_-]{50,80}/unlock', request.url.path))
         if not public:
             csrf = request.cookies.get('dms_csrf', '')
             if not csrf or not secrets.compare_digest(csrf, request.headers.get('x-csrf-token', '')):
@@ -83,7 +83,7 @@ async def security_headers(request: Request, call_next):
         response = Response('Anfrage überschreitet das Größenlimit.', status_code=413)
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'SAMEORIGIN'
-    response.headers['Referrer-Policy'] = 'same-origin'
+    response.headers['Referrer-Policy'] = 'no-referrer' if request.url.path.startswith(('/share/', '/api/shares/')) else 'same-origin'
     response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
     response.headers['Permissions-Policy'] = 'camera=(self), microphone=(), geolocation=()'
     if request.url.path.startswith('/api/'):
@@ -96,7 +96,7 @@ def user_data(user):
 
 
 def doc_data(doc, full=False):
-    keys = ['id', 'title', 'filename', 'mime', 'size', 'folder_id', 'status', 'error', 'supplier', 'doc_type', 'tags', 'amount', 'due_date', 'paid', 'source', 'created_at', 'deleted_at', 'processed_at', 'sha256', 'current_version', 'restricted', 'review_status', 'ai_pending']
+    keys = ['id', 'title', 'filename', 'mime', 'size', 'folder_id', 'status', 'error', 'supplier', 'doc_type', 'tags', 'amount', 'due_date', 'paid', 'source', 'created_at', 'deleted_at', 'processed_at', 'sha256', 'current_version', 'restricted', 'review_status', 'ai_pending', 'ocr_failed']
     result = {key: getattr(doc, key) for key in keys}
     if full:
         result['text'] = doc.text
@@ -897,3 +897,5 @@ from .tenant_backup import router as backup_router
 app.include_router(mfa_router)
 app.include_router(features_router)
 app.include_router(backup_router)
+from .workspace_tools import router as workspace_router
+app.include_router(workspace_router)

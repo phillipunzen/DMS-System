@@ -33,6 +33,10 @@ def validate_config(kind, config, enabled):
         config.setdefault('after_import', 'delete')
         return
     if kind == 'ai':
+        if not isinstance(config.get('document_fallback', False), bool):
+            raise HTTPException(422, 'Ungültige Freigabe für vollständige Dokumente.')
+        if config.get('document_fallback') is True and (config.get('privacy_mode') != 'automatic' or config.get('automatic_consent') is not True or config.get('consent') is not True):
+            raise HTTPException(422, 'Vollständige Dokumentübertragung benötigt den automatischen Modus mit Zustimmung.')
         mode = config.setdefault('privacy_mode', 'manual')
         if not isinstance(mode, str) or mode not in {'manual', 'automatic'}:
             raise HTTPException(422, 'Ungültiger KI-Verarbeitungsmodus.')
@@ -47,7 +51,7 @@ def validate_config(kind, config, enabled):
         if not isinstance(provider, str) or provider not in {'openai', 'codex'}:
             raise HTTPException(422, 'Unbekannter KI-Anbieter.')
         if provider == 'codex':
-            if set(config) - {'provider', 'model', 'consent', 'privacy_mode', 'text_limit', 'automatic_consent'}:
+            if set(config) - {'provider', 'model', 'consent', 'privacy_mode', 'text_limit', 'automatic_consent', 'document_fallback'}:
                 raise HTTPException(422, 'Codex verwendet die Server-Anmeldung; keine Schlüssel oder eigenen Befehle erlaubt.')
             model = config.get('model', '')
             if not isinstance(model, str) or len(model) > 150 or (model and not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._:/-]*', model)):

@@ -15,6 +15,8 @@ def heartbeat(document_id, stop):
         try:
             with SessionLocal() as db:
                 db.execute(update(Document).where(Document.id == document_id, Document.status == 'processing').values(heartbeat_at=now()))
+                from .db import Setting
+                db.merge(Setting(key='worker.last_tick', value=now().isoformat()))
                 db.commit()
         except Exception:
             logging.warning('Worker-Heartbeat nicht gespeichert')
@@ -27,6 +29,8 @@ def tick():
         db.execute(delete(MFAChallenge).where(MFAChallenge.expires_at < now()))
         db.execute(delete(LoginSession).where(LoginSession.expires_at < now()))
         db.execute(delete(AuthAttempt).where(AuthAttempt.reset_at < now() - timedelta(hours=1)))
+        from .db import Setting
+        db.merge(Setting(key='worker.last_tick', value=now().isoformat()))
         db.commit()
         doc = db.scalar(select(Document).where(Document.status == 'queued', Document.deleted_at.is_(None)).order_by(Document.created_at).limit(1).with_for_update(skip_locked=True))
         if doc:

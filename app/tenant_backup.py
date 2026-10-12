@@ -21,6 +21,7 @@ from .db import *
 from .security import current_user, membership, audit, setting
 from .storage import version_path, path_for, ROOT, ALLOWED
 from .schemas import RuleInput
+from .workspace_tools import ContractInput, AnnotationInput, NoteInput
 
 router = APIRouter()
 MAX_BACKUP = int(os.getenv('MAX_TENANT_BACKUP_MB', '250')) * 1024 * 1024
@@ -65,6 +66,21 @@ class BackupDocument(BaseModel):
     deleted_at: datetime | None = None
     created_at: datetime
     versions: list[BackupVersion] = Field(min_length=1, max_length=100000)
+    ocr_failed: bool = False
+    contract: ContractInput | None = None
+    notes: list['BackupNote'] = Field(default_factory=list, max_length=10000)
+    annotations: list['BackupAnnotation'] = Field(default_factory=list, max_length=10000)
+
+
+class BackupNote(NoteInput):
+    author: str = Field(default='', max_length=150)
+    created_at: datetime
+    updated_at: datetime
+
+
+class BackupAnnotation(AnnotationInput):
+    author: str = Field(default='', max_length=150)
+    created_at: datetime
 
 
 class BackupRule(RuleInput):
@@ -146,7 +162,13 @@ def export_tenant(tenant_id: str, data: BackupInput, user=Depends(current_user),
         total = 0
         with zipfile.ZipFile(directory / 'archive.zip', 'w', compression=zipfile.ZIP_DEFLATED) as archive:
             for doc in docs:
-                item = {k: getattr(doc, k) for k in ['id', 'title', 'filename', 'folder_id', 'current_version', 'restricted', 'text', 'supplier', 'doc_type', 'tags', 'amount', 'due_date', 'paid', 'deleted_at', 'created_at']}
+                item = {k: getattr(doc, k) for k in ['id', 'title', 'filename', 'folder_id', 'current_version', 'restricted', 'text', 'supplier', 'doc_type', 'tags', 'amount', 'due_date', 'paid', 'deleted_at', 'created_at', 'ocr_failed']}
+                contract = db.get(Contract, doc.id)
+                item['contract'] = {k: getattr(contract, k) for k in ContractInput.model_fields} if contract else None
+                item['notes'] = [{k: getattr(n, k) for k in ['body', 'created_at', 'updated_at']} | {'author': db.get(User, n.author_id).name}
+                    for n in db.scalars(select(DocumentNote).where(DocumentNote.document_id == doc.id))]
+                item['annotations'] = [{k: getattr(a, k) for k in ['version', 'page', 'rect', 'color', 'body', 'created_at']} | {'author': db.get(User, a.author_id).name}
+                    for a in db.scalars(select(Annotation).where(Annotation.document_id == doc.id))]
                 versions = db.scalars(select(DocumentVersion).where(DocumentVersion.document_id == doc.id).order_by(DocumentVersion.number)).all()
                 item['versions'] = []
                 if not versions: raise ValueError('Missing version')
@@ -217,6 +239,7 @@ def restore_tenant(file: UploadFile = File(...), password: str = Form(min_length
                     db.add(Folder(id=new_id, tenant_id=tenant.id, name=f.name, color=f.color, restricted=f.restricted))
                 db.flush()
                 total = 0
+                restored_authors = {}
                 for imported in manifest.documents:
                     if imported.folder_id and str(imported.folder_id) not in mapping: raise ValueError('Folder')
                     numbers = [v.number for v in imported.versions]
@@ -227,7 +250,7 @@ def restore_tenant(file: UploadFile = File(...), password: str = Form(min_length
                         text=imported.text, supplier=imported.supplier, doc_type=imported.doc_type, tags=imported.tags,
                         amount=imported.amount, due_date=imported.due_date, paid=imported.paid, restricted=imported.restricted,
                         status='ready', source='restore', created_at=imported.created_at.replace(tzinfo=None), deleted_at=imported.deleted_at.replace(tzinfo=None) if imported.deleted_at else None,
-                        processed_at=now(), review_status='unassigned' if tenant.workflow_enabled else 'none')
+                        processed_at=now(), ocr_failed=imported.ocr_failed, review_status='unassigned' if tenant.workflow_enabled else 'none')
                     db.add(doc); db.flush()
                     for v in imported.versions:
                         if v.mime not in ALLOWED: raise ValueError('Mime')
@@ -247,12 +270,25 @@ def restore_tenant(file: UploadFile = File(...), password: str = Form(min_length
                         path.chmod(0o600)
                         if written != v.size or checksum.hexdigest() != v.sha256: raise ValueError('Checksum')
                         db.add(DocumentVersion(tenant_id=tenant.id, document_id=doc.id, number=v.number, filename=v.filename, mime=v.mime, size=v.size, sha256=v.sha256, uploader_id=user.id, note=v.note, created_at=v.created_at.replace(tzinfo=None)))
+                    if imported.contract:
+                        db.add(Contract(document_id=doc.id, **imported.contract.model_dump()))
+                    for note in imported.notes:
+                        db.add(DocumentNote(document_id=doc.id, author_id=user.id, body=note.body,
+                            created_at=note.created_at.replace(tzinfo=None), updated_at=note.updated_at.replace(tzinfo=None)))
+                    for a in imported.annotations:
+                        version = next((v for v in imported.versions if v.number == a.version), None)
+                        if not version or version.mime != 'application/pdf': raise ValueError('Annotation version')
+                        db.add(Annotation(document_id=doc.id, author_id=user.id, version=a.version, page=a.page,
+                            rect=a.rect, color=a.color, body=a.body, created_at=a.created_at.replace(tzinfo=None)))
+                    if imported.notes or imported.annotations:
+                        restored_authors[doc.id] = {'notes': [n.model_dump(mode='json') for n in imported.notes],
+                            'annotations': [a.model_dump(mode='json') for a in imported.annotations]}
                 for rule in manifest.rules:
                     if rule.folder_id and str(rule.folder_id) not in mapping: raise ValueError('Rule folder')
                     db.add(Rule(tenant_id=tenant.id, name=rule.name, field=rule.field, contains=rule.contains, folder_id=mapping.get(str(rule.folder_id)), filename_template=rule.filename_template, priority=rule.priority, enabled=rule.enabled))
                 # Preserve archived access and review details for the owner's inspection.
                 # Never auto-enrol former users, import secrets or queue cloud processing.
-                db.add(Setting(key='restore-history:' + tenant.id, value=json.dumps({'access_lists': manifest.access_lists, 'reviews': manifest.reviews}, ensure_ascii=False)))
+                db.add(Setting(key='restore-history:' + tenant.id, value=json.dumps({'access_lists': manifest.access_lists, 'reviews': manifest.reviews, 'original_authors': restored_authors}, ensure_ascii=False)))
                 audit(db, user, tenant.id, 'tenant.backup_restored', str(len(manifest.documents)) + ' Dokumente; frühere Freigaben erfordern erneute Prüfung')
                 db.commit()
                 return {'id': tenant.id, 'name': tenant.name, 'documents': len(manifest.documents)}

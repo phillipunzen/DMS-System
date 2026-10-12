@@ -111,7 +111,7 @@ def test_codex_gateway_rejects_unauthenticated_and_oversized_requests(monkeypatc
         assert client.post(endpoint, json={}).status_code == 403
     client.headers['X-Codex-Token'] = 'private-service-token-' * 3
     assert client.post('/v1/extract', json={'text': 'x' * 30001}).status_code == 422
-    assert client.post('/v1/extract', json={'text': 'x'}, headers={'Content-Length': '200000'}).status_code == 413
+    assert client.post('/v1/extract', json={'text': 'x'}, headers={'Content-Length': '33554433'}).status_code == 413
     async def extract(text, model):
         return RESULT
     monkeypatch.setattr(server.runtime, 'extract', extract)
