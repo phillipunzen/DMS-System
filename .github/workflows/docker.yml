@@ -35,6 +35,8 @@ jobs:
           python3 scripts/init_env.py
           docker compose -f compose.yaml -f compose.dev.yaml config --quiet
           docker compose -f docker-compose.yml -f docker-compose.db.yml config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.host.yml config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.db.yml -f docker-compose.host.yml -f docker-compose.host-db.yml config --quiet
       - name: Build application for tests
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:

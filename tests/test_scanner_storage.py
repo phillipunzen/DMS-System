@@ -293,3 +293,20 @@ def test_login_limit_counts_failures_not_successful_scans(alice,scanner):
     for _ in range(12):
         with pytest.raises(PermissionError):service.authenticate(credentials['username'],'incorrect','sftp','192.0.2.45')
     with pytest.raises(PermissionError):service.authenticate(credentials['username'],credentials['password'],'sftp','192.0.2.45')
+
+
+def test_scanner_listener_configuration(monkeypatch):
+    for name, value in {'SFTP_LISTEN_PORT':'14222', 'FTP_LISTEN_PORT':'14221',
+                        'FTP_PASSIVE_MIN':'14300', 'FTP_PASSIVE_MAX':'14309'}.items():
+        monkeypatch.setenv(name, value)
+    assert service.scanner_ports() == {'SFTP_LISTEN_PORT':14222, 'FTP_LISTEN_PORT':14221,
+                                    'FTP_PASSIVE_MIN':14300, 'FTP_PASSIVE_MAX':14309}
+    monkeypatch.setenv('FTP_LISTEN_PORT', '14222')
+    with pytest.raises(ValueError): service.scanner_ports()
+    monkeypatch.setenv('FTP_LISTEN_PORT', '14300')
+    with pytest.raises(ValueError): service.scanner_ports()
+    monkeypatch.setenv('FTP_LISTEN_PORT', '14221')
+    monkeypatch.setenv('FTP_PASSIVE_MAX', '14299')
+    with pytest.raises(ValueError): service.scanner_ports()
+    monkeypatch.setenv('FTP_PASSIVE_MAX', '65536')
+    with pytest.raises(ValueError): service.scanner_ports()

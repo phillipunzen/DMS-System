@@ -5,6 +5,11 @@ import subprocess
 import sys
 import time
 
+listen_host = os.getenv('APP_LISTEN_HOST', '0.0.0.0')
+listen_port = int(os.getenv('APP_LISTEN_PORT', '8000'))
+if not 1 <= listen_port <= 65535:
+    raise ValueError('APP_LISTEN_PORT must be between 1 and 65535')
+
 children = []
 
 
@@ -22,7 +27,7 @@ def stop(*_):
 signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
 children.append(subprocess.Popen([sys.executable, '-m', 'app.worker']))
-children.append(subprocess.Popen([sys.executable, '-m', 'uvicorn', 'app.main:app', '--host', '0.0.0.0', '--port', '8000', '--no-proxy-headers', '--no-access-log', '--limit-concurrency', '100']))
+children.append(subprocess.Popen([sys.executable, '-m', 'uvicorn', 'app.main:app', '--host', listen_host, '--port', str(listen_port), '--no-proxy-headers', '--no-access-log', '--limit-concurrency', '100']))
 while True:
     if any(child.poll() is not None for child in children):
         for child in children:

@@ -93,6 +93,45 @@ Always use **`-f docker-compose.yml`** for the published-image deployment. The s
 
 Open your configured HTTPS domain, sign in with the bootstrap email and the password from `INITIAL_ACCESS.txt`, change the password under **Konto → Passwort ändern**, and delete the access file. Bootstrap credentials only create the first administrator when no administrator exists; changing the environment later does not reset an existing account.
 
+### Dedicated Linux server with host networking
+
+For a dedicated Linux Docker host or VM, add `docker-compose.host.yml` to use host networking for the application, scanner, NAS manager and Codex gateway. Requires Docker Compose **2.24.0 or later**. The override also works with the source-build `compose.yaml`. Host networking removes Docker port translation; listeners bind directly to the selected host ports. Use these variables in `.env`:
+
+```dotenv
+APP_BIND=0.0.0.0
+APP_PORT=8120
+SCANNER_BIND=0.0.0.0
+SCANNER_PUBLIC_HOST=192.168.10.70
+SFTP_PORT=2222
+FTP_PORT=2121
+FTP_PASSIVE_MIN=30000
+FTP_PASSIVE_MAX=30009
+# Private helpers are always bound to 127.0.0.1 in this configuration.
+CODEX_PORT=8001
+STORAGE_PORT=8002
+DATABASE_URL=mysql+pymysql://dms:URL_ENCODED_PASSWORD@mariadb.internal:3306/dms?charset=utf8mb4
+```
+
+Replace the example IP with the new server's address, set `ALLOWED_HOSTS` accordingly, and keep all chosen ports distinct and free. With a host reverse proxy, use `APP_BIND=127.0.0.1` and enable secure cookies for HTTPS. Prepare the NAS shared bind mount and scanner input directory as described above, then run:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.host.yml config --quiet
+docker compose -f docker-compose.yml -f docker-compose.host.yml pull
+docker compose -f docker-compose.yml -f docker-compose.host.yml up -d
+```
+
+Use both files for every subsequent update, status or stop command. Allow the web and SFTP ports in the host firewall for the intended clients; allow FTP and its passive range only if needed. Docker `ports:` mappings are removed by this override. Port changes in `.env` take effect when Compose recreates the services. The scanner address configured in the Web UI must match the actual listener ports; that form does not reconfigure listeners. FTP accounts remain optional and require explicit tenant activation.
+
+The NAS and Codex control APIs use loopback only and retain authentication tokens. Host networking shares the host network namespace, so these internal APIs are reachable by other local host processes; use a dedicated trusted host. Host networking **does not grant NAS mount privileges**. Native SMB/NFS mounts require the existing NAS helper capabilities and a host kernel that permits them; an unprivileged LXC cannot gain those permissions through network mode alone. Prefer a VM or regular Linux server. No fully privileged container or Docker socket is required.
+
+For evaluation with the optional local database, use all four files in this order. The database remains on its bridge network and publishes only `127.0.0.1:${DB_PORT:-3307}`; the override supplies the application/scanner connection URL automatically:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.db.yml -f docker-compose.host.yml -f docker-compose.host-db.yml up -d
+```
+
+Set `DB_PORT` in `.env` if 3307 is occupied. Production with an external MariaDB only needs the first two files. See [Docker's host networking documentation](https://docs.docker.com/engine/network/drivers/host/) for network behavior.
+
 ### Evaluate with a local database
 
 For direct HTTP evaluation, the generated `.env` already supplies random database passwords and `COOKIE_SECURE=false`. Set `APP_BIND=0.0.0.0` if you want LAN access, and set `ALLOWED_HOSTS` to the server's IP/hostnames. Use both files for every command:

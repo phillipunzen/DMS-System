@@ -1,0 +1,41 @@
+# Dedicated Linux Docker host / VM. Compose >= 2.24.0 is required for !reset.
+# docker compose -f docker-compose.yml -f docker-compose.host.yml up -d
+# APP_PORT, SFTP_PORT and FTP_PORT become actual listener ports (no NAT).
+# Host firewall rules still apply. Keep the helper/gateway on loopback.
+services:
+  app:
+    network_mode: host
+    networks: !reset []
+    ports: !reset []
+    environment:
+      APP_LISTEN_HOST: ${APP_BIND:-127.0.0.1}
+      APP_LISTEN_PORT: ${APP_PORT:-8120}
+      STORAGE_SERVICE_URL: http://127.0.0.1:${STORAGE_PORT:-8002}
+      CODEX_SERVICE_URL: http://127.0.0.1:${CODEX_PORT:-8001}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request; h=os.getenv('APP_LISTEN_HOST','0.0.0.0'); h='127.0.0.1' if h=='0.0.0.0' else h; urllib.request.urlopen('http://'+h+':'+os.environ['APP_LISTEN_PORT']+'/api/health')"]
+  storage:
+    network_mode: host
+    networks: !reset []
+    ports: !reset []
+    entrypoint: ["/usr/bin/tini", "--", "python", "-m", "uvicorn", "storage_service.server:app", "--host", "127.0.0.1", "--port", "${STORAGE_PORT:-8002}", "--no-access-log"]
+    environment:
+      STORAGE_SERVICE_URL: http://127.0.0.1:${STORAGE_PORT:-8002}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${STORAGE_PORT:-8002}/health')"]
+  scanner:
+    network_mode: host
+    networks: !reset []
+    ports: !reset []
+    environment:
+      SCANNER_LISTEN_HOST: ${SCANNER_BIND:-0.0.0.0}
+      SFTP_LISTEN_PORT: ${SFTP_PORT:-2222}
+      FTP_LISTEN_PORT: ${FTP_PORT:-2121}
+      STORAGE_SERVICE_URL: http://127.0.0.1:${STORAGE_PORT:-8002}
+  codex:
+    network_mode: host
+    networks: !reset []
+    ports: !reset []
+    command: ["python", "-m", "uvicorn", "codex_service.server:app", "--host", "127.0.0.1", "--port", "${CODEX_PORT:-8001}", "--no-access-log"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${CODEX_PORT:-8001}/health')"]

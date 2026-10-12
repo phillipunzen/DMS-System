@@ -1,0 +1,14 @@
+# Optional evaluation DB for host networking. Use these files in this order:
+# -f docker-compose.yml -f docker-compose.db.yml
+# -f docker-compose.host.yml -f docker-compose.host-db.yml
+# The DB keeps its bridge network and exposes only a loopback port.
+services:
+  db:
+    ports:
+      - "127.0.0.1:${DB_PORT:-3307}:3306"
+  app:
+    environment:
+      DATABASE_URL: mysql+pymysql://dms:${DB_PASSWORD:?Generate DB_PASSWORD in .env}@127.0.0.1:${DB_PORT:-3307}/dms?charset=utf8mb4
+  scanner:
+    environment:
+      DATABASE_URL: mysql+pymysql://dms:${DB_PASSWORD:?Generate DB_PASSWORD in .env}@127.0.0.1:${DB_PORT:-3307}/dms?charset=utf8mb4

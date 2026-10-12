@@ -88,14 +88,14 @@ services:
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
       SCANNER_PUBLIC_HOST: ${SCANNER_PUBLIC_HOST:-}
       FTP_PASV_ADDRESS: ${FTP_PASV_ADDRESS:-}
-      FTP_PASSIVE_MIN: 30000
-      FTP_PASSIVE_MAX: 30009
+      FTP_PASSIVE_MIN: ${FTP_PASSIVE_MIN:-30000}
+      FTP_PASSIVE_MAX: ${FTP_PASSIVE_MAX:-30009}
     ports:
       - "${SCANNER_BIND:-0.0.0.0}:${SFTP_PORT:-2222}:2222"
       # Optional FTP accounts remain disabled until a tenant owner selects FTP.
       # Firewall these LAN-only ports if FTP is not needed.
       - "${SCANNER_BIND:-0.0.0.0}:${FTP_PORT:-2121}:2121"
-      - "${SCANNER_BIND:-0.0.0.0}:30000-30009:30000-30009"
+      - "${SCANNER_BIND:-0.0.0.0}:${FTP_PASSIVE_MIN:-30000}-${FTP_PASSIVE_MAX:-30009}:${FTP_PASSIVE_MIN:-30000}-${FTP_PASSIVE_MAX:-30009}"
     volumes:
       - ${CONSUME_PATH:-./consume}:/data/consume
       - storage_state:/data/storage-state

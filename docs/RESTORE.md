@@ -10,7 +10,7 @@ A full restore replaces data. First test on a separate instance with its own dat
 
 1. Compare each dump/archive's SHA-256 with `manifest.json`, if using the development helper.
 2. Restore configuration privately. Reuse the saved `SECRET_KEY` so integration/MFA secrets can be decrypted. Set `.env` permissions to 0600. Use the image version corresponding to the backup; do not assume a newer database can run an older image.
-3. Choose a different Compose project name, port and persistent storage. Set a separate `CONSUME_PATH` and never allow a real scanner to write to the test restore input.
+3. Choose a different Compose project name, port and persistent storage. Set a separate `CONSUME_PATH` and never allow a real scanner to write to the test restore input. For host networking, preserve the `docker-compose.host.yml` override and choose distinct `APP_PORT`, `SFTP_PORT`, `FTP_PORT`, passive FTP range, `CODEX_PORT`, `STORAGE_PORT` and optional `DB_PORT` for the recovery test.
 4. Start only the selected restore database and import the SQL dump. For a local-database **published-image restore instance**:
 
    ```bash

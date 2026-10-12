@@ -8,6 +8,9 @@ services:
     depends_on:
       db:
         condition: service_healthy
+  scanner:
+    environment:
+      DATABASE_URL: mysql+pymysql://dms:${DB_PASSWORD:?Generate DB_PASSWORD in .env}@db:3306/dms?charset=utf8mb4
   db:
     image: mariadb:11.4
     restart: unless-stopped

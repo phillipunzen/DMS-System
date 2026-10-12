@@ -316,6 +316,20 @@ class SafeDTP(DTPHandler):
         super().close()
 
 
+def scanner_ports():
+    values = {name: int(os.getenv(name, default)) for name, default in {
+        'SFTP_LISTEN_PORT': '2222', 'FTP_LISTEN_PORT': '2121',
+        'FTP_PASSIVE_MIN': '30000', 'FTP_PASSIVE_MAX': '30009'}.items()}
+    if any(not 1 <= value <= 65535 for value in values.values()):
+        raise ValueError('Scanner ports must be between 1 and 65535')
+    low, high = values['FTP_PASSIVE_MIN'], values['FTP_PASSIVE_MAX']
+    if low > high or values['SFTP_LISTEN_PORT'] == values['FTP_LISTEN_PORT']:
+        raise ValueError('Scanner ports must be distinct and the passive range must be ordered')
+    if any(low <= values[name] <= high for name in ('SFTP_LISTEN_PORT', 'FTP_LISTEN_PORT')):
+        raise ValueError('Passive FTP ports must not overlap scanner control ports')
+    return values
+
+
 class FTPInbox(FTPHandler):
     authorizer = FTPAccounts()
     abstracted_fs = FTPInboxFS
@@ -326,7 +340,7 @@ class FTPInbox(FTPHandler):
     max_login_attempts = 3
     permit_foreign_addresses = False
     permit_privileged_ports = False
-    passive_ports = range(int(os.getenv('FTP_PASSIVE_MIN', '30000')), int(os.getenv('FTP_PASSIVE_MAX', '30009')) + 1)
+    passive_ports = range(scanner_ports()['FTP_PASSIVE_MIN'], scanner_ports()['FTP_PASSIVE_MAX'] + 1)
     masquerade_address = os.getenv('FTP_PASV_ADDRESS') or None
     def ftp_PASV(self, line):
         if not os.getenv('FTP_PASV_ADDRESS'):
@@ -394,8 +408,10 @@ def main():
         key = paramiko.RSAKey.generate(3072)
         key.write_private_key_file(str(key_path)); key_path.chmod(0o600)
     fingerprint = 'SHA256:' + base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip('=')
-    listener = start_sftp(key)
-    ftp = ThreadedFTPServer(('0.0.0.0', 2121), FTPInbox)
+    ports = scanner_ports()
+    bind = os.getenv('SCANNER_LISTEN_HOST', '0.0.0.0')
+    listener = start_sftp(key, port=ports['SFTP_LISTEN_PORT'], host=bind)
+    ftp = ThreadedFTPServer((bind, ports['FTP_LISTEN_PORT']), FTPInbox)
     ftp.max_cons, ftp.max_cons_per_ip = 40, 5
     thread = threading.Thread(target=ftp.serve_forever, kwargs={'timeout':1, 'handle_exit':False}, daemon=True)
     thread.start()
