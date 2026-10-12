@@ -78,9 +78,9 @@ def _tick():
 
 
 def tick():
-    from .storage_control import storage_gate, root
+    from .storage_control import storage_gate, require_worker_storage
     with storage_gate():
-        root('documents')
+        require_worker_storage()
         return _tick()
 
 

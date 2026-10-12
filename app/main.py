@@ -25,10 +25,16 @@ STATIC = Path(__file__).parent / 'static'
 @asynccontextmanager
 async def lifespan(app):
     # Schema migration is performed by the container entrypoint, not each API process.
+    # Never touch a remote filesystem on API startup: a persisted NFS mount
+    # can still be present while its server/network is down or unresponsive.
+    # The NAS helper prepares its directories when activating the share.
+    from .storage_control import state as storage_state
     try:
-        ROOT.mkdir(parents=True, exist_ok=True)
-    except HTTPException:
-        pass  # Keep administration reachable when NAS is unavailable.
+        if storage_state()['mode'] == 'local':
+            ROOT.mkdir(parents=True, exist_ok=True)
+    except (HTTPException, OSError):
+        import logging
+        logging.warning('Dokumentenspeicher nicht verfügbar; Administration bleibt erreichbar.')
     with SessionLocal() as db:
         if not db.scalar(select(User.id).where(User.admin.is_(True))):
             email = os.getenv('BOOTSTRAP_ADMIN_EMAIL')
