@@ -1,0 +1,16 @@
+.env
+.env.*
+INITIAL_ACCESS.txt
+.git
+.venv
+node_modules
+__pycache__
+*.db
+artifacts
+consume/
+documents/
+backups/
+codex_auth/
+*.dmsbackup
+.pytest_cache/
+**/*.pyc

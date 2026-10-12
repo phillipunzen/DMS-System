@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+INITIAL_ACCESS.txt
+*.db
+__pycache__/
+.pytest_cache/
+.venv/
+node_modules/
+artifacts/
+consume/
+documents/
+backups/
+codex_auth/
+*.dmsbackup

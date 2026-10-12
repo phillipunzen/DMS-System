@@ -1,0 +1,30 @@
+# Optional local MariaDB for evaluating the published images.
+# docker compose -f docker-compose.yml -f docker-compose.db.yml up -d
+# Production with external MariaDB needs only docker-compose.yml.
+services:
+  app:
+    environment:
+      DATABASE_URL: mysql+pymysql://dms:${DB_PASSWORD:?Generate DB_PASSWORD in .env}@db:3306/dms?charset=utf8mb4
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: dms
+      MARIADB_USER: dms
+      # init_env.py generates URL-safe random hexadecimal database passwords.
+      MARIADB_PASSWORD: ${DB_PASSWORD:?Generate DB_PASSWORD in .env}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Generate DB_ROOT_PASSWORD in .env}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    # Intentionally no published database port.
+    volumes:
+      - database:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+volumes:
+  database:

@@ -1,0 +1,57 @@
+name: dms-archiv
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      CODEX_SERVICE_URL: http://codex:8001
+      STORAGE_ROOT: /data/documents
+      CONSUME_ROOT: /data/consume
+      CONSUME_HOST_PATH: ${CONSUME_PATH:-./consume}
+    networks: [default, codex_private]
+    ports:
+      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8120}:8000"
+    volumes:
+      - ${DOCUMENTS_PATH:-documents}:/data/documents
+      - ${CONSUME_PATH:-./consume}:/data/consume
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=1G,mode=1777
+  codex:
+    build:
+      context: .
+      dockerfile: codex_service/Dockerfile
+    restart: unless-stopped
+    environment:
+      CODEX_SERVICE_TOKEN: ${CODEX_SERVICE_TOKEN:-}
+      CODEX_STATE_ROOT: /data/codex
+    volumes:
+      - codex_auth:/data/codex
+    networks: [codex_private]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    tmpfs:
+      - /tmp:size=256M,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+networks:
+  codex_private:
+volumes:
+  documents:
+  codex_auth:

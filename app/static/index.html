@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#4f46e5">
+  <meta name="description" content="Ihr digitaler Dokumentenraum. Dokumente organisieren, finden und gemeinsam verwalten.">
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <link rel="stylesheet" href="/static/style.css">
+  <title>Archivraum</title>
+  <script src="/static/app.js" defer></script>
+  <script src="/static/features.js" defer></script>
+</head>
+<body>
+  <div id="app"><div class="startup"><span class="brand-symbol">A</span><p>Ihr Dokumentenraum wird geöffnet …</p></div></div>
+  <div id="toast-region" aria-live="polite"></div>
+  <dialog id="modal"><div id="modal-content"></div></dialog>
+  <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.txt" multiple hidden>
+</body>
+</html>

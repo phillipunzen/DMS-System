@@ -177,6 +177,8 @@ An AI outage leaves the document and local OCR searchable, with an **AI pending 
 
 The gateway uses the official Codex App Server over local stdio, pinned to CLI **0.162.1**. Each document gets a new ephemeral thread, isolated temporary working directory and validated output schema. Shell/tools, browsing, apps, plugins and further agents are disabled. The gateway receives only the minimized text; it cannot access the DMS database or originals. Account access conditions and usage limits apply; there is no automatic paid-API fallback.
 
+**Account quota display:** Server administrators see the provider-reported remaining/used percentages, window durations, reset times and additional credits (when supplied) in **Serveradministration → Codex**. Values come from the official `account/rateLimits/read` endpoint, refresh approximately every minute and include usage by other Codex clients and all authorized tenants. Missing values remain unknown; a failed quota read does not disconnect the account or block document extraction. These figures are not a document/token allowance. Tenant members cannot access account quota, email or plan details. See the [official rate-limit API](https://learn.chatgpt.com/docs/app-server#rate-limits-tokenscredits).
+
 The `codex_auth` volume persists sensitive account tokens, owned by UID/GID 10002. Protect and back it up separately; disconnect via the admin panel. For login/data-handling details see [OpenAI's Codex authentication documentation](https://developers.openai.com/codex/auth/) and [App Server documentation](https://developers.openai.com/codex/app-server/). Ephemeral local threads do not guarantee zero provider-side retention.
 
 ### OpenAI API

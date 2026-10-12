@@ -1,0 +1,89 @@
+# Published-image deployment. Always select this file explicitly:
+#   docker compose -f docker-compose.yml pull
+#   docker compose -f docker-compose.yml up -d
+# compose.yaml is the separate local source-build configuration.
+#
+# Create .env with `python3 scripts/init_env.py`, then set DATABASE_URL to
+# your external MariaDB and review the HTTPS/host settings before starting.
+# Optional local DB: add `-f docker-compose.db.yml` to every command.
+# GHCR may require `docker login ghcr.io` until the packages are made public.
+name: dms-system
+services:
+  app:
+    image: ghcr.io/phillipunzen/dms-system:${IMAGE_TAG:-latest}
+    pull_policy: always
+    restart: unless-stopped
+    depends_on:
+      codex:
+        condition: service_healthy
+    environment:
+      # Keep SECRET_KEY unchanged: it encrypts integration and MFA credentials.
+      SECRET_KEY: ${SECRET_KEY:?Generate SECRET_KEY in .env first}
+      # External MariaDB with an existing database and a dedicated DDL-capable user.
+      # URL-encode credentials; the container must be able to reach this host.
+      DATABASE_URL: ${DATABASE_URL:?Set the external MariaDB connection URL in .env}
+      # Used only to create the first administrator when none exists.
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@example.com}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set a bootstrap password of at least 12 characters}
+      # HTTPS deployments: true. Direct HTTP testing only: false.
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      # Comma-separated hostnames/IPs without schemes or ports. Additional
+      # domains may be configured in Server administration. Avoid * in production.
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+      MAX_TENANT_BACKUP_MB: ${MAX_TENANT_BACKUP_MB:-250}
+      STORAGE_ROOT: /data/documents
+      CONSUME_ROOT: /data/consume
+      CONSUME_HOST_PATH: ${CONSUME_PATH:-./consume}
+      CODEX_SERVICE_URL: http://codex:8001
+      # Internal shared secret, NOT an OpenAI API key. Use >=32 random characters.
+      CODEX_SERVICE_TOKEN: ${CODEX_SERVICE_TOKEN:?Generate CODEX_SERVICE_TOKEN in .env first}
+    ports:
+      # Use 127.0.0.1 for a host reverse proxy; 0.0.0.0 for direct LAN testing.
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8120}:8000"
+    volumes:
+      # Named volume by default. For NAS use a pre-mounted absolute host path.
+      # Never point document storage and scanner input at the same directory.
+      - ${DOCUMENTS_PATH:-documents}:/data/documents
+      - ${CONSUME_PATH:-./consume}:/data/consume
+    networks: [default, codex_private]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    tmpfs:
+      - /tmp:size=1G,mode=1777
+  codex:
+    image: ghcr.io/phillipunzen/dms-system-codex:${IMAGE_TAG:-latest}
+    pull_policy: always
+    restart: unless-stopped
+    init: true
+    environment:
+      CODEX_SERVICE_TOKEN: ${CODEX_SERVICE_TOKEN:?Generate CODEX_SERVICE_TOKEN in .env first}
+      CODEX_STATE_ROOT: /data/codex
+    # Persistent ChatGPT login tokens. UID/GID 10002; include in protected backups.
+    volumes:
+      - codex_auth:/data/codex
+    # No host port, database credentials or document mount. Network egress is
+    # required for official ChatGPT login and inference; do not mark it internal.
+    networks: [codex_private]
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    tmpfs:
+      - /tmp:size=256M,mode=1777
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+networks:
+  codex_private:
+volumes:
+  documents:
+  codex_auth:
