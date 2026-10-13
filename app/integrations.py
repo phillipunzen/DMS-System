@@ -5,6 +5,7 @@ import re
 import ssl
 import hashlib
 import shutil
+import magic
 from datetime import timedelta
 from email.policy import default
 from urllib.parse import urlparse
@@ -18,6 +19,12 @@ from .storage import save_document, path_for, MAX_UPLOAD
 
 
 def validate_config(kind, config, enabled):
+    if kind == 'imap':
+        selected_filter = config.get('attachment_filter', 'all')
+        if not isinstance(selected_filter, str) or selected_filter not in {'all', 'pdf'}:
+            raise HTTPException(422, 'Ungültiger E-Mail-Anhangfilter.')
+        if not isinstance(config.get('import_body', False), bool):
+            raise HTTPException(422, 'E-Mail-Textimport muss ein Wahrheitswert sein.')
     if kind == 'folder':
         if set(config) - {'after_import', 'settle_seconds', 'folder_id'}:
             raise HTTPException(422, 'Der Importpfad wird ausschließlich vom Server vorgegeben.')
@@ -86,21 +93,34 @@ def import_mail(db, integration, config):
     owner = db.scalar(select(Membership.user_id).where(Membership.tenant_id == tenant.id, Membership.role == 'owner'))
     inbox = db.scalar(select(Folder).where(Folder.tenant_id == tenant.id, Folder.name == 'Eingang'))
     count = 0
+    skipped = 0
+    pdf_only = config.get('attachment_filter', 'all') == 'pdf'
     integration._created_paths = []
     with imaplib.IMAP4_SSL(config['host'], int(config.get('port', 993)), ssl_context=ssl.create_default_context(), timeout=20) as client:
         client.login(config['username'], config['password'])
         status, _ = client.select(config.get('folder', 'INBOX'), readonly=True)
         if status != 'OK':
             raise ValueError('IMAP-Ordner nicht verfügbar')
-        validity = str(client.response('UIDVALIDITY')[1])
+        validity_data = client.response('UIDVALIDITY')[1]
+        if not validity_data or not any(isinstance(value, bytes) and value.strip().isdigit() and int(value.strip()) > 0 for value in validity_data):
+            raise ValueError('IMAP UIDVALIDITY fehlt')
+        # Preserve existing receipt keys across upgrades; UIDVALIDITY separates
+        # reused UIDs after a mailbox reset. Nondefault ports need their own namespace.
+        validity = str(validity_data)
         status, data = client.uid('search', None, 'ALL')
         if status != 'OK':
             raise ValueError('IMAP-Suche fehlgeschlagen')
         # Progress from oldest to newest so large mailboxes are not starved.
         processed = 0
         for uid in data[0].split():
-            key = hashlib.sha256((config['host'] + config['username'] + config.get('folder', 'INBOX') + validity + uid.decode()).encode()).hexdigest()
+            source = config['host'] + config['username'] + config.get('folder', 'INBOX') + validity + uid.decode()
+            if int(config.get('port', 993)) != 993:
+                source += '\0port=' + str(config['port'])
+            key = hashlib.sha256(source.encode()).hexdigest()
+            filtered_key = hashlib.sha256((key + ':filter:pdf:v1').encode()).hexdigest()
             if db.scalar(select(MailImport.id).where(MailImport.integration_id == integration.id, MailImport.message_key == key)):
+                continue
+            if pdf_only and db.scalar(select(MailImport.id).where(MailImport.integration_id == integration.id, MailImport.message_key == filtered_key)):
                 continue
             if processed >= 30:
                 break
@@ -113,18 +133,30 @@ def import_mail(db, integration, config):
             if status != 'OK':
                 continue
             raw = next((item[1] for item in message_data if isinstance(item, tuple)), None)
-            if not raw:
+            if not raw or len(raw) > MAX_UPLOAD * 2:
                 continue
             message = email.message_from_bytes(raw, policy=default)
+            attachments = []
+            for index, part in enumerate(message.walk(), 1):
+                filename = part.get_filename()
+                if part.is_multipart() or (not filename and (not pdf_only or part.get_content_disposition() != 'attachment')):
+                    continue
+                content = part.get_payload(decode=True)
+                if not content:
+                    continue
+                if pdf_only and magic.from_buffer(content, mime=True) != 'application/pdf':
+                    continue
+                attachments.append((str(filename or f'Anhang-{index}.pdf'), content))
+            if pdf_only and not attachments:
+                # Remember a nonmatch for this filter only. Widening the filter
+                # later can still import it; successful imports always use key.
+                db.add(MailImport(integration_id=integration.id, message_key=filtered_key))
+                db.flush()
+                skipped += 1
+                continue
             created = []
             try:
-                for part in message.walk():
-                    filename = part.get_filename()
-                    if not filename:
-                        continue
-                    content = part.get_payload(decode=True)
-                    if not content:
-                        continue
+                for filename, content in attachments:
                     try:
                         doc = save_document(db, tenant.id, owner, str(filename), io.BytesIO(content), source='email')
                         doc.folder_id = inbox.id if inbox else None
@@ -153,7 +185,7 @@ def import_mail(db, integration, config):
                 for doc in created:
                     shutil.rmtree(path_for(tenant.id, doc.id).parent, ignore_errors=True)
                 raise
-    return f'{count} Dokumente importiert.'
+    return f'{count} Dokumente importiert.' + (f' {skipped} E-Mails ohne PDF-Anhang übersprungen.' if skipped else '')
 
 
 def sync_calendar(db, integration, config):
