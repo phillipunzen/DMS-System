@@ -145,7 +145,7 @@ def backup_info(tenant_id: str, user=Depends(current_user), db=Depends(get_db)):
 def export_tenant(tenant_id: str, data: BackupInput, user=Depends(current_user), db=Depends(get_db)):
     membership(db, user, tenant_id, 'owner')
     tenant = db.scalar(select(Tenant).where(Tenant.id == tenant_id).with_for_update())
-    docs = db.scalars(select(Document).where(Document.tenant_id == tenant_id).with_for_update()).all()
+    docs = db.scalars(select(Document).where(Document.tenant_id == tenant_id, Document.status != 'purging').with_for_update()).all()
     if any(d.status == 'processing' for d in docs):
         raise HTTPException(409, 'Eine Verarbeitung läuft. Sicherung nach Abschluss erneut starten.')
     directory = Path(tempfile.mkdtemp(prefix='dms-backup-'))

@@ -202,6 +202,7 @@ class CalendarSync(Base):
     id = mapped_column(String(36), primary_key=True, default=uid)
     integration_id = mapped_column(String(36), ForeignKey('integrations.id'))
     document_id = mapped_column(String(36), ForeignKey('documents.id'))
+    event_uid = mapped_column(String(120), nullable=True)
 
 
 class FolderImport(Base):

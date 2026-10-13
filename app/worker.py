@@ -32,6 +32,8 @@ def _tick():
         from .db import Setting
         db.merge(Setting(key='worker.last_tick', value=now().isoformat()))
         db.commit()
+        from .deletion import purge_pending
+        busy = purge_pending(db)
         doc = db.scalar(select(Document).where(Document.status == 'queued', Document.deleted_at.is_(None)).order_by(Document.created_at).limit(1).with_for_update(skip_locked=True))
         if doc:
             busy = True

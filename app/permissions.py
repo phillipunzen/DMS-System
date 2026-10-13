@@ -20,12 +20,14 @@ def document_clause(user_id, role, edit=False):
     return and_(or_(Document.restricted.is_(False), direct), or_(Document.folder_id.is_(None), folder))
 
 
-def document_access(db, user, tenant_id, document_id, edit=False, lock=False):
+def document_access(db, user, tenant_id, document_id, edit=False, lock=False, allow_purging=False):
     member = membership(db, user, tenant_id, 'editor' if edit else 'viewer')
     query = select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id, document_clause(user.id, member.role, edit))
     doc = db.scalar(query.with_for_update() if lock else query)
     if not doc:
         raise HTTPException(404, 'Dokument nicht gefunden oder kein Zugriff.')
+    if doc.status == 'purging' and not allow_purging:
+        raise HTTPException(409, 'Dokument wird endgültig gelöscht und kann nicht mehr geändert oder wiederhergestellt werden.')
     return doc
 
 

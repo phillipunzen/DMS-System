@@ -235,7 +235,7 @@ Point DNS at your server/reverse proxy. Preserve the original **Host** header an
 | --- | --- |
 | Viewer | Search, view and download accessible documents |
 | Editor | Also upload, edit metadata, add versions and manage trash/recovery |
-| Manager | Also manage permitted folders, rules and lower-role members |
+| Manager | Also manage permitted folders, rules and lower-role members, and permanently delete editable trashed documents |
 | Owner | Also configure integrations, access lists, workflows, backups, activity history and membership roles |
 | Server administrator | Global settings, quotas, domains, account suspension and external authentication; document access still requires tenant membership |
 
@@ -269,6 +269,8 @@ Rules run after OCR, after successful AI processing/retries and for filenames af
 Renaming updates the visible/download filename and records an audit event. Document titles, checksums, original version names and stored content remain intact. Path/control characters in metadata are sanitized, names fit a 255-byte UTF-8 limit, and conflicting active names within a tenant gain the document ID. Templates accept only the documented placeholders, with no code or expressions. Tenant backups include templates and current display names; older backups without these fields still restore.
 
 ## Document workspace tools
+
+**Deletion and Trash:** Editors with document/folder edit access can use the trash icon in document lists or **Löschen** in document details. This moves the document to **Papierkorb**, where it remains recoverable and still counts against storage quota. Managers/owners with edit access can choose **Endgültig löschen** in Trash or document details and confirm. Permanent deletion requires a trashed document and cannot be undone. Its durable background job removes the archive directory with all versions, OCR/metadata, notes, PDF annotations, reviews, document grants, contracts and sharing tokens. Restoration, viewing and editing are blocked once deletion has been confirmed. Storage failures retain the job and retry automatically; quota is released after cleanup completes. The trash list displays progress and refreshes automatically while deletions are pending. Symlinked archive directories are rejected. Audit entries and import receipts remain, preventing automatic reimport from previously consumed mail/scans. Original mail/scanner sources and separately retained backups/NAS snapshots are unaffected. Pending CalDAV event removal is retained and retried on the next successful calendar synchronization, even after document metadata is gone. New tenant backup exports exclude documents already marked for permanent deletion.
 
 **Duplikate:** Upload/scanner imports reject a checksum already present in an active document's current or historical versions within the same tenant. The message does not reveal another document's ID/name. Scanner duplicate sources remain in the input directory. The duplicate view compares only documents the current member can read: up to the latest 200 active documents, at most 100 pairs. Word-set similarity over the first 50,000 OCR characters (minimum 12 distinct words and 100 characters, threshold 85%) is a review hint, not proof of identity. Invoice numbers/amounts are not removed; nothing is automatically merged or deleted.
 

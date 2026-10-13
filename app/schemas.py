@@ -26,6 +26,8 @@ class DocInput(BaseModel):
     amount: str | None = Field(default=None, pattern=r'^\d{1,12}([.,]\d{1,2})?$')
     due_date: date | None = None
     paid: bool = False
+class PurgeInput(BaseModel):
+    confirmed: Literal[True]
 class RuleInput(BaseModel):
     name: str = Field(min_length=1, max_length=150)
     field: Literal['all', 'text', 'supplier', 'doc_type', 'title', 'filename']

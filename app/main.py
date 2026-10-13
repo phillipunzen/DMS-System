@@ -286,7 +286,9 @@ def documents(tenant_id: str, q: str = '', folder: str = '', doc_type: str = '',
         query = query.where(Document.due_date.is_not(None), Document.paid.is_(False))
     total = db.scalar(select(func.count()).select_from(query.subquery()))
     result = db.scalars(query.order_by(Document.created_at.desc()).offset(max(0, offset)).limit(min(max(1, limit), 100))).all()
-    return {'total': total, 'items': [doc_data(doc) for doc in result]}
+    editable = set(db.scalars(select(Document.id).where(Document.id.in_([doc.id for doc in result]),
+        Document.tenant_id == tenant_id, document_clause(user.id, member.role, True))).all()) if member.role in {'editor', 'manager', 'owner'} else set()
+    return {'total': total, 'items': [doc_data(doc) | {'can_edit': doc.id in editable and doc.status != 'purging'} for doc in result]}
 
 
 @app.post('/api/tenants/{tenant_id}/documents')
@@ -374,6 +376,25 @@ def restore_document(tenant_id: str, document_id: str, user=Depends(current_user
     audit(db, user, tenant_id, 'document.restored', doc.id)
     db.commit()
     return {'ok': True}
+
+
+@app.post('/api/tenants/{tenant_id}/documents/{document_id}/purge', status_code=202)
+def purge_document(tenant_id: str, document_id: str, data: PurgeInput, user=Depends(current_user), db=Depends(get_db)):
+    membership(db, user, tenant_id, 'manager')
+    # Coordinate with tenant backup snapshots and quota updates.
+    db.scalar(select(Tenant).where(Tenant.id == tenant_id).with_for_update())
+    doc = document_access(db, user, tenant_id, document_id, edit=True, lock=True, allow_purging=True)
+    if not doc.deleted_at:
+        raise HTTPException(409, 'Dokument zuerst in den Papierkorb verschieben.')
+    if doc.status == 'processing':
+        raise HTTPException(409, 'Dokument wird gerade verarbeitet. Bitte kurz warten.')
+    if doc.status != 'purging':
+        # Persist intent before touching files. A restart or NAS failure resumes the same job.
+        doc.status, doc.error, doc.heartbeat_at = 'purging', None, None
+        doc.ai_pending, doc.ai_retry_at = False, None
+        audit(db, user, tenant_id, 'document.purge_requested', doc.id)
+        db.commit()
+    return {'status': 'purging'}
 
 
 @app.post('/api/tenants/{tenant_id}/documents/{document_id}/reprocess')

@@ -210,14 +210,15 @@ def sync_calendar(db, integration, config):
             cal.add_component(event)
             calendar.save_event(cal.to_ical().decode())
             if not db.scalar(select(CalendarSync.id).where(CalendarSync.integration_id == integration.id, CalendarSync.document_id == doc.id)):
-                db.add(CalendarSync(integration_id=integration.id, document_id=doc.id))
+                db.add(CalendarSync(integration_id=integration.id, document_id=doc.id, event_uid=uid))
             count += 1
         for sync in db.scalars(select(CalendarSync).where(CalendarSync.integration_id == integration.id)).all():
             if sync.document_id not in active_ids:
-                old = db.get(Document, sync.document_id)
-                if old:
+                old = db.get(Document, sync.document_id) if sync.document_id else None
+                event_uid = sync.event_uid or (f'archivraum-{old.tenant_id}-{old.id}' if old else None)
+                if event_uid:
                     try:
-                        calendar.event_by_uid(f'archivraum-{old.tenant_id}-{old.id}').delete()
+                        calendar.event_by_uid(event_uid).delete()
                     except caldav.error.NotFoundError:
                         pass
                 db.delete(sync)
