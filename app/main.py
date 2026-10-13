@@ -228,17 +228,33 @@ def folders(tenant_id: str, user=Depends(current_user), db=Depends(get_db)):
     visible = select(Folder).where(Folder.tenant_id == tenant_id)
     if member.role != 'owner':
         visible = visible.where(folder_clause(user.id))
+    from .permissions import FOLDER_ANCESTORS
+    totals = dict(db.execute(select(FOLDER_ANCESTORS.c.ancestor_id, func.count(Document.id)).join(
+        Document, Document.folder_id == FOLDER_ANCESTORS.c.descendant_id).where(Document.tenant_id == tenant_id,
+            Document.deleted_at.is_(None), document_clause(user.id, member.role)).group_by(FOLDER_ANCESTORS.c.ancestor_id)).all())
     result = []
     for folder in db.scalars(visible.order_by(Folder.name)):
         count = db.scalar(select(func.count()).select_from(Document).where(Document.tenant_id == tenant_id, Document.folder_id == folder.id, Document.deleted_at.is_(None), document_clause(user.id, member.role)))
-        result.append({'id': folder.id, 'name': folder.name, 'color': folder.color, 'count': count, 'restricted': folder.restricted})
+        result.append({'id': folder.id, 'name': folder.name, 'display_name': folder.name.rsplit('/', 1)[-1] if folder.parent_id else folder.name,
+            'parent_id': folder.parent_id, 'color': folder.color, 'count': count, 'total_count': totals.get(folder.id, 0), 'restricted': folder.restricted})
     return result
 
 
 @app.post('/api/tenants/{tenant_id}/folders')
 def add_folder(tenant_id: str, data: FolderInput, user=Depends(current_user), db=Depends(get_db)):
     membership(db, user, tenant_id, 'manager')
-    folder = Folder(tenant_id=tenant_id, **data.model_dump())
+    from .folders import folder_depth, MAX_DEPTH
+    from .naming import safe_part, RESERVED
+    name = data.name.strip()
+    if not name or name in {'.', '..'} or safe_part(name) != name or RESERVED.match(name):
+        raise HTTPException(422, 'Gültigen Ordnernamen ohne Pfad oder Sonderzeichen eingeben.')
+    parent = folder_access(db, user, tenant_id, data.parent_id, edit=True) if data.parent_id else None
+    if folder_depth(db, parent) >= MAX_DEPTH:
+        raise HTTPException(422, 'Ordnerstrukturen dürfen höchstens 8 Ebenen enthalten.')
+    path = parent.name + '/' + name if parent else name
+    if len(path) > 700:
+        raise HTTPException(422, 'Der Ordnerpfad ist zu lang.')
+    folder = Folder(tenant_id=tenant_id, name=path, parent_id=parent.id if parent else None, color=data.color)
     db.add(folder)
     audit(db, user, tenant_id, 'folder.created', data.name)
     try:
@@ -253,6 +269,8 @@ def add_folder(tenant_id: str, data: FolderInput, user=Depends(current_user), db
 def remove_folder(tenant_id: str, folder_id: str, user=Depends(current_user), db=Depends(get_db)):
     membership(db, user, tenant_id, 'manager')
     folder = folder_access(db, user, tenant_id, folder_id, edit=True)
+    if db.scalar(select(Folder.id).where(Folder.tenant_id == tenant_id, Folder.parent_id == folder_id)):
+        raise HTTPException(409, 'Den Ordner vor dem Löschen von Unterordnern leeren.')
     if folder.restricted and db.scalar(select(Document.id).where(Document.folder_id == folder_id)):
         raise HTTPException(409, 'Geschützten Ordner vor dem Löschen leeren.')
     if db.scalar(select(Rule.id).where(Rule.tenant_id == tenant_id, Rule.folder_id == folder_id)):
@@ -495,7 +513,7 @@ def rules(tenant_id: str, user=Depends(current_user), db=Depends(get_db)):
     query = select(Rule).outerjoin(Folder, Rule.folder_id == Folder.id).where(Rule.tenant_id == tenant_id)
     if member.role != 'owner':
         query = query.where(or_(Rule.folder_id.is_(None), folder_clause(user.id)))
-    return [{key: getattr(r, key) for key in ['id', 'name', 'field', 'contains', 'folder_id', 'filename_template', 'priority', 'enabled']} for r in db.scalars(query.order_by(Rule.priority, Rule.id))]
+    return [{key: getattr(r, key) for key in ['id', 'name', 'field', 'contains', 'folder_id', 'filename_template', 'folder_template', 'priority', 'enabled']} for r in db.scalars(query.order_by(Rule.priority, Rule.id))]
 
 
 @app.post('/api/tenants/{tenant_id}/rules')
@@ -503,7 +521,7 @@ def add_rule(tenant_id: str, data: RuleInput, user=Depends(current_user), db=Dep
     membership(db, user, tenant_id, 'manager')
     if data.folder_id:
         folder_access(db, user, tenant_id, data.folder_id, edit=True)
-    rule = Rule(tenant_id=tenant_id, **data.model_dump())
+    rule = Rule(tenant_id=tenant_id, author_id=user.id, **data.model_dump())
     db.add(rule)
     audit(db, user, tenant_id, 'rule.created', data.name)
     db.commit()
@@ -522,6 +540,7 @@ def update_rule(tenant_id: str, rule_id: str, data: RuleInput, user=Depends(curr
         folder_access(db, user, tenant_id, rule.folder_id, edit=True)
     for key, value in data.model_dump().items():
         setattr(rule, key, value)
+    rule.author_id = user.id
     audit(db, user, tenant_id, 'rule.updated', rule.name)
     db.commit()
     return {'ok': True}
@@ -546,7 +565,7 @@ def apply_rules(tenant_id: str, user=Depends(current_user), db=Depends(get_db)):
     from .processing import classify
     membership(db, user, tenant_id, 'manager')
     member = membership(db, user, tenant_id)
-    docs = db.scalars(select(Document).where(Document.tenant_id == tenant_id, Document.deleted_at.is_(None), Document.status.notin_(['processing', 'queued']), document_clause(user.id, member.role, True)).order_by(Document.id).with_for_update()).all()
+    docs = db.scalars(select(Document).where(Document.tenant_id == tenant_id, Document.deleted_at.is_(None), Document.status.notin_(['processing', 'queued', 'purging']), document_clause(user.id, member.role, True)).order_by(Document.id).with_for_update()).all()
     changed = 0
     permitted = rule_permissions(db, user, tenant_id)
     for doc in docs:

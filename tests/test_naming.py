@@ -237,7 +237,9 @@ def test_legacy_backup_without_new_fields_restores(alice, tmp_path):
             if info.filename == 'manifest.json':
                 manifest = json.loads(data)
                 for item in manifest['documents']: item.pop('filename')
-                for item in manifest['rules']: item.pop('filename_template')
+                for item in manifest['rules']:
+                    item.pop('filename_template'); item.pop('folder_template')
+                for item in manifest['folders']: item.pop('parent_id')
                 data = json.dumps(manifest).encode()
             old.writestr(info.filename, data)
     encrypt_file(tmp_path / 'old.zip', tmp_path / 'old.backup', password)

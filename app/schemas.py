@@ -16,6 +16,7 @@ class TenantInput(BaseModel):
     name: str = Field(min_length=1, max_length=150)
 class FolderInput(BaseModel):
     name: str = Field(min_length=1, max_length=150)
+    parent_id: str | None = None
     color: Literal['green', 'blue', 'orange', 'purple'] = 'green'
 class DocInput(BaseModel):
     title: str = Field(min_length=1, max_length=255)
@@ -34,13 +35,35 @@ class RuleInput(BaseModel):
     contains: str = Field(default='', max_length=150)
     folder_id: str | None = None
     filename_template: str | None = Field(default=None, max_length=255)
+    folder_template: str | None = Field(default=None, max_length=700)
     priority: int = Field(default=100, ge=0, le=9999)
     enabled: bool = True
+
+    @model_validator(mode='before')
+    @classmethod
+    def split_combined_path(cls, data):
+        if isinstance(data, dict) and isinstance(data.get('filename_template'), str) and '/' in data['filename_template']:
+            data = dict(data)
+            path, filename = data['filename_template'].rsplit('/', 1)
+            if data.get('folder_template') or not filename.strip():
+                raise ValueError('Ordner-Vorlage separat oder als Präfix vor dem Dateinamen eingeben; nicht beides.')
+            # Validate before field coercion so absolute paths and traversal cannot disappear.
+            from .folders import validate_folder_template
+            if not validate_folder_template(path):
+                raise ValueError('Absolute Pfade sind nicht erlaubt.')
+            data['folder_template'], data['filename_template'] = path, filename
+        return data
 
     @field_validator('filename_template')
     @classmethod
     def valid_template(cls, value):
         return validate_template(value)
+
+    @field_validator('folder_template')
+    @classmethod
+    def valid_folder_template(cls, value):
+        from .folders import validate_folder_template
+        return validate_folder_template(value)
 
     @model_validator(mode='after')
     def valid_rule(self):
@@ -48,8 +71,8 @@ class RuleInput(BaseModel):
         self.folder_id = self.folder_id or None
         if self.field != 'all' and not self.contains:
             raise ValueError('Geben Sie einen Suchtext für die Bedingung ein.')
-        if not self.folder_id and not self.filename_template:
-            raise ValueError('Wählen Sie einen Zielordner oder geben Sie eine Namensvorlage ein.')
+        if not self.folder_id and not self.filename_template and not self.folder_template:
+            raise ValueError('Wählen Sie einen Zielordner oder geben Sie eine Ordner- oder Namensvorlage ein.')
         return self
 class InviteInput(BaseModel):
     email: EmailStr

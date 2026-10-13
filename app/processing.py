@@ -62,11 +62,31 @@ def classify(db, doc, permitted=None, actor_id=None, rename_only=False):
     for rule in rules:
         if rule.field != 'all' and rule.contains.casefold() not in fields.get(rule.field, '') and not (rule.field == 'filename' and rule.contains.casefold() in original.casefold()):
             continue
-        if permitted is not None and not permitted(rule):
+        action_permitted = permitted
+        if rule.folder_template and action_permitted is None:
+            # Dynamic destinations must remain within the configuring member's
+            # current rights, including during unattended worker processing.
+            from .db import User, Membership, Document
+            from .permissions import rule_permissions, document_clause
+            author = db.get(User, rule.author_id) if rule.author_id else None
+            role = db.scalar(select(Membership.role).where(Membership.tenant_id == doc.tenant_id,
+                Membership.user_id == rule.author_id)) if author else None
+            if not author or not author.active or role not in {'manager', 'owner'}:
+                continue
+            if not db.scalar(select(Document.id).where(Document.id == doc.id, Document.tenant_id == doc.tenant_id,
+                    document_clause(author.id, role, edit=True))):
+                continue
+            action_permitted = rule_permissions(db, author, doc.tenant_id)
+        if action_permitted is not None and not action_permitted(rule):
             continue
-        if rule.folder_id and not moved and not rename_only:
-            changed |= doc.folder_id != rule.folder_id
-            doc.folder_id = rule.folder_id
+        if (rule.folder_id or rule.folder_template) and not moved and not rename_only:
+            from .folders import resolve_rule_folder
+            target = resolve_rule_folder(db, doc, rule,
+                allowed=(lambda fid: action_permitted(rule, folder_id=fid)) if action_permitted else None, actor_id=actor_id)
+            if not target:
+                continue
+            changed |= doc.folder_id != target.id
+            doc.folder_id = target.id
             moved = True
         if rule.filename_template and not renamed:
             filename = render_filename(db, doc, rule.filename_template)

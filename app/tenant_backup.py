@@ -34,7 +34,8 @@ class BackupInput(BaseModel):
 
 class BackupFolder(BaseModel):
     id: uuid.UUID
-    name: str = Field(min_length=1, max_length=150)
+    name: str = Field(min_length=1, max_length=700)
+    parent_id: uuid.UUID | None = None
     color: str = Field(max_length=20)
     restricted: bool = False
 
@@ -152,8 +153,8 @@ def export_tenant(tenant_id: str, data: BackupInput, user=Depends(current_user),
     try:
         folder_rows = db.scalars(select(Folder).where(Folder.tenant_id == tenant_id)).all()
         payload = {'format': 'archivraum-tenant-v1', 'name': tenant.name, 'workflow_enabled': tenant.workflow_enabled,
-            'folders': [{k: getattr(f, k) for k in ['id', 'name', 'color', 'restricted']} for f in folder_rows], 'documents': [],
-            'rules': [{k: getattr(r, k) for k in ['name', 'field', 'contains', 'folder_id', 'filename_template', 'priority', 'enabled']} for r in db.scalars(select(Rule).where(Rule.tenant_id == tenant_id))],
+            'folders': [{k: getattr(f, k) for k in ['id', 'name', 'parent_id', 'color', 'restricted']} for f in folder_rows], 'documents': [],
+            'rules': [{k: getattr(r, k) for k in ['name', 'field', 'contains', 'folder_id', 'filename_template', 'folder_template', 'priority', 'enabled']} for r in db.scalars(select(Rule).where(Rule.tenant_id == tenant_id))],
             'access_lists': {'folders': {}, 'documents': {}}, 'reviews': []}
         for model, scope, parent, rows in [(FolderGrant, 'folders', 'folder_id', folder_rows), (DocumentGrant, 'documents', 'document_id', docs)]:
             for item in rows:
@@ -228,6 +229,19 @@ def restore_tenant(file: UploadFile = File(...), password: str = Form(min_length
                 doc_ids = [str(d.id) for d in manifest.documents]
                 if len(set(folder_ids)) != len(folder_ids) or len(set(doc_ids)) != len(doc_ids): raise ValueError('Duplicate IDs')
                 if len({f.name for f in manifest.folders}) != len(manifest.folders): raise ValueError('Duplicate folders')
+                # Validate the graph before writing any restored tenant or archive file.
+                by_id = {str(f.id): f for f in manifest.folders}
+                for f in manifest.folders:
+                    current, seen = f, set()
+                    while current:
+                        key = str(current.id)
+                        if key in seen or len(seen) >= 8: raise ValueError('Folder cycle or depth')
+                        seen.add(key)
+                        if not current.parent_id: break
+                        parent = by_id.get(str(current.parent_id))
+                        if not parent or not current.name.startswith(parent.name + '/') or '/' in current.name[len(parent.name) + 1:]:
+                            raise ValueError('Folder parent')
+                        current = parent
                 tenant = Tenant(id=uid(), name=name, workflow_enabled=manifest.workflow_enabled)
                 db.add(tenant); db.flush()
                 db.add(Membership(tenant_id=tenant.id, user_id=user.id, role='owner'))
@@ -237,6 +251,10 @@ def restore_tenant(file: UploadFile = File(...), password: str = Form(min_length
                 for f in manifest.folders:
                     new_id = uid(); mapping[str(f.id)] = new_id
                     db.add(Folder(id=new_id, tenant_id=tenant.id, name=f.name, color=f.color, restricted=f.restricted))
+                db.flush()
+                for f in manifest.folders:
+                    if f.parent_id:
+                        db.get(Folder, mapping[str(f.id)]).parent_id = mapping[str(f.parent_id)]
                 db.flush()
                 total = 0
                 restored_authors = {}
@@ -285,7 +303,7 @@ def restore_tenant(file: UploadFile = File(...), password: str = Form(min_length
                             'annotations': [a.model_dump(mode='json') for a in imported.annotations]}
                 for rule in manifest.rules:
                     if rule.folder_id and str(rule.folder_id) not in mapping: raise ValueError('Rule folder')
-                    db.add(Rule(tenant_id=tenant.id, name=rule.name, field=rule.field, contains=rule.contains, folder_id=mapping.get(str(rule.folder_id)), filename_template=rule.filename_template, priority=rule.priority, enabled=rule.enabled))
+                    db.add(Rule(tenant_id=tenant.id, author_id=user.id, name=rule.name, field=rule.field, contains=rule.contains, folder_id=mapping.get(str(rule.folder_id)), filename_template=rule.filename_template, folder_template=rule.folder_template, priority=rule.priority, enabled=rule.enabled))
                 # Preserve archived access and review details for the owner's inspection.
                 # Never auto-enrol former users, import secrets or queue cloud processing.
                 db.add(Setting(key='restore-history:' + tenant.id, value=json.dumps({'access_lists': manifest.access_lists, 'reviews': manifest.reviews, 'original_authors': restored_authors}, ensure_ascii=False)))

@@ -4,11 +4,24 @@ from sqlalchemy import select, exists, or_, and_, true, func
 from .db import Document, Folder, DocumentGrant, FolderGrant, DocumentVersion
 from .security import membership
 
+# All ancestors participate in access checks. Changing a parent's grants takes
+# effect immediately for its entire subtree, without copying stale grants.
+_folders = Folder.__table__
+_parent = _folders.alias('folder_parent')
+FOLDER_ANCESTORS = select(_folders.c.id.label('descendant_id'), _folders.c.id.label('ancestor_id'),
+    _folders.c.tenant_id, _folders.c.parent_id).cte('folder_ancestors', recursive=True)
+FOLDER_ANCESTORS = FOLDER_ANCESTORS.union_all(select(FOLDER_ANCESTORS.c.descendant_id, _parent.c.id,
+    _parent.c.tenant_id, _parent.c.parent_id).join(_parent,
+        and_(_parent.c.id == FOLDER_ANCESTORS.c.parent_id, _parent.c.tenant_id == FOLDER_ANCESTORS.c.tenant_id)))
+
 
 def folder_clause(user_id, edit=False):
-    granted = exists(select(FolderGrant.id).where(FolderGrant.folder_id == Folder.id, FolderGrant.user_id == user_id,
+    ancestor = _folders.alias('access_ancestor')
+    granted = exists(select(FolderGrant.id).where(FolderGrant.folder_id == ancestor.c.id, FolderGrant.user_id == user_id,
         *([FolderGrant.can_edit.is_(True)] if edit else [])))
-    return or_(Folder.restricted.is_(False), granted)
+    denied = exists(select(1).select_from(FOLDER_ANCESTORS.join(ancestor, ancestor.c.id == FOLDER_ANCESTORS.c.ancestor_id)).where(
+        FOLDER_ANCESTORS.c.descendant_id == Folder.id, ancestor.c.restricted.is_(True), ~granted).correlate(Folder))
+    return ~denied
 
 
 def document_clause(user_id, role, edit=False):
@@ -45,7 +58,13 @@ def folder_access(db, user, tenant_id, folder_id, edit=False):
 def rule_permissions(db, user, tenant_id):
     """Authorize a rule's entire action before mutating a visible document."""
     cache = {}
-    def permitted(rule):
+    def permitted(rule, folder_id=None):
+        if folder_id:
+            try:
+                folder_access(db, user, tenant_id, folder_id, edit=True)
+                return True
+            except HTTPException:
+                return False
         if rule.id not in cache:
             try:
                 if rule.folder_id:

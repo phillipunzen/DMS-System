@@ -41,17 +41,24 @@ def truncate(value, limit):
     return value.encode('utf-8')[:limit].decode('utf-8', errors='ignore').rstrip(' .')
 
 
-def render_filename(db, doc, template):
+def template_values(db, doc):
     version = db.scalar(select(DocumentVersion).where(DocumentVersion.document_id == doc.id,
         DocumentVersion.tenant_id == doc.tenant_id, DocumentVersion.number == doc.current_version))
     original = version.filename if version else doc.filename
     created = doc.created_at
-    values = {'date': created.strftime('%Y-%m-%d') if created else None,
+    return {'date': created.strftime('%Y-%m-%d') if created else None,
         'year': created.strftime('%Y') if created else None, 'month': created.strftime('%m') if created else None,
         'day': created.strftime('%d') if created else None,
         'sender': doc.supplier, 'supplier': doc.supplier, 'doc_type': doc.doc_type, 'title': doc.title,
         'original_name': Path(original).stem, 'due_date': doc.due_date.isoformat() if doc.due_date else None,
         'amount': doc.amount, 'id': doc.id, 'version': doc.current_version}
+
+
+def render_filename(db, doc, template):
+    values = template_values(db, doc)
+    version = db.scalar(select(DocumentVersion).where(DocumentVersion.document_id == doc.id,
+        DocumentVersion.tenant_id == doc.tenant_id, DocumentVersion.number == doc.current_version))
+    original = version.filename if version else doc.filename
     required = PLACEHOLDER.findall(template)
     if any(values[f] is None or not safe_part(values[f]) for f in required):
         return None  # Retry after metadata is available; never fabricate missing values.

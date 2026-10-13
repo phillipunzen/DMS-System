@@ -561,3 +561,10 @@ dialog::backdrop { background: #0a153780; backdrop-filter: blur(5px); }
 
 .document-row-actions { display: flex; gap: 4px; align-items: center; }
 .delete-document { color: var(--danger, #dc2626); }
+/* Nested folder navigation remains usable on narrow screens. */
+.folder-breadcrumbs{display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin:0 0 20px;min-width:0}
+.folder-breadcrumbs>.icon{flex-shrink:0}
+.folder-breadcrumbs .btn{max-width:100%;white-space:normal;overflow-wrap:anywhere}
+.subfolder-heading{font-size:16px;margin:0 0 12px}
+.folder-card strong,.rule-template code,.name-preview output{overflow-wrap:anywhere}
+.folder-breadcrumbs ~ .folder-grid{margin-bottom:24px}

@@ -18,7 +18,7 @@ def test_calendar_upgrade_preserves_existing_receipts_and_protects_pending_clean
         db.add(receipt);db.commit();receipt_id=receipt.id
     config=Config(str(Path(__file__).resolve().parents[1]/'alembic.ini'))
     try:
-        command.stamp(config,'0009')
+        command.stamp(config,'head')
         command.downgrade(config,'0008')
         command.upgrade(config,'head')
         with SessionLocal() as db:

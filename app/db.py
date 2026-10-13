@@ -74,7 +74,8 @@ class Folder(Base):
     __table_args__ = (UniqueConstraint('tenant_id', 'name'),)
     id = mapped_column(String(36), primary_key=True, default=uid)
     tenant_id = mapped_column(String(36), ForeignKey('tenants.id'), index=True)
-    name = mapped_column(String(150), nullable=False)
+    name = mapped_column(String(700), nullable=False)
+    parent_id = mapped_column(String(36), ForeignKey('folders.id', name='fk_folders_parent'), nullable=True, index=True)
     color = mapped_column(String(20), default='green')
     restricted = mapped_column(Boolean, default=False, nullable=False)
 
@@ -122,6 +123,8 @@ class Rule(Base):
     contains = mapped_column(String(150), nullable=False)
     folder_id = mapped_column(String(36), ForeignKey('folders.id'), nullable=True)
     filename_template = mapped_column(String(255), nullable=True)
+    folder_template = mapped_column(String(700), nullable=True)
+    author_id = mapped_column(String(36), ForeignKey('users.id', name='fk_rules_author'), nullable=True)
     priority = mapped_column(Integer, default=100)
     enabled = mapped_column(Boolean, default=True)
 
