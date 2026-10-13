@@ -134,10 +134,11 @@ def test_active_file_transfer_postpones_reconnect_until_lock_released(nas):
     nas.records.clear()
     with storage_control.storage_gate():
         assert not nas.server.reconnect_once()
-    assert not nas.calls['mount']
-    assert nas.server.active() == nas.data
-    assert nas.server.reconnect_once()
     assert len(nas.calls['mount']) == 1
+    assert nas.server.active() == nas.data
+    assert len(nas.calls['unmount']) == 1
+    assert nas.server.reconnect_once()
+    assert len(nas.calls['mount']) == 2
 
 
 def test_concurrent_manual_save_is_not_interrupted(nas):
@@ -238,4 +239,26 @@ def test_reconnect_refreshes_kernel_source_record(nas, monkeypatch):
     assert nas.server.active()['source'] == '192.0.2.10:/var/nfs/shared/DMS'
     assert nas.server.reconnect_once()
     assert len(nas.calls['mount']) == 1
+    assert nas.server.status()['connected']
+
+
+def test_slow_nas_mount_does_not_block_api_access_gate(nas, monkeypatch):
+    nas.records.clear()
+    started, release = threading.Event(), threading.Event()
+    original = nas.server.mount_share
+    def delayed(config, path):
+        started.set()
+        assert release.wait(5)
+        original(config, path)
+    monkeypatch.setattr(nas.server, 'mount_share', delayed)
+    thread = threading.Thread(target=nas.server.reconnect_once)
+    thread.start()
+    try:
+        assert started.wait(5)
+        with storage_control.storage_gate():
+            assert nas.server.active() == nas.data
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
     assert nas.server.status()['connected']

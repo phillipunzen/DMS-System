@@ -316,20 +316,22 @@ def reconnect_once():
                 return True
         else:
             connection_status(data, False, 'NAS-Verbindung wird automatisch hergestellt.', True)
+        # Mount/probe a separate candidate without pausing API logins or
+        # metadata requests while an offline NAS times out. LOCK still excludes
+        # concurrent manual storage changes; only the atomic switch needs the
+        # cross-process file-access gate.
+        candidate = NAS_ROOT / str(uuid.uuid4())
+        mount_share(config, candidate)
+        write_probe(candidate, config['subdirectory'])
+        updated = data | mount_record(candidate)
         with storage_gate(exclusive=True):
-            # Use the same successful path as a manual same-share reconnect:
-            # prepare/verify a fresh mount, then switch state atomically. Never
-            # stack mounts, copy from the broken tree or fall back to local data.
-            candidate = NAS_ROOT / str(uuid.uuid4())
-            mount_share(config, candidate)
-            write_probe(candidate, config['subdirectory'])
-            updated = data | mount_record(candidate)
+            # Never stack mounts, migrate a broken tree or fall back to local data.
             atomic_json(STATE_ROOT / 'active.json', updated)
             committed = True
             connection_status(updated, True, 'NAS-Verbindung automatisch wiederhergestellt.')
-            if mounted(data['mount'], data['source'], data['fstype']):
-                cleanup_mount(data['mount'])
-            return True
+        if mounted(data['mount'], data['source'], data['fstype']):
+            cleanup_mount(data['mount'])
+        return True
     except Exception as exc:
         message = 'NAS-Verbindung fehlgeschlagen. Automatischer Wiederholungsversuch folgt; gespeicherte Einstellungen bleiben erhalten.'
         if isinstance(exc, HTTPException) and exc.status_code == 503:
