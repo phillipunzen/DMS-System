@@ -64,6 +64,8 @@ class PasswordInput(BaseModel):
 class IntegrationInput(BaseModel):
     enabled: bool = False
     config: dict
+class MailboxInput(IntegrationInput):
+    name: str = Field(min_length=1, max_length=150)
 class SettingsInput(BaseModel):
     app_name: str = Field(min_length=1, max_length=80)
     # Retain the legacy API field for clients sending false; public sign-up cannot be enabled.

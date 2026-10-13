@@ -17,7 +17,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature
 from starlette.background import BackgroundTask
 from .db import (Document, DocumentVersion, DocumentNote, Annotation, Contract, ShareLink,
     Membership, Tenant, User, Integration, FolderImport, Setting, Audit, AuthAttempt, now, get_db)
-from .security import current_user, admin_user, membership, audit, digest, passwords, secret, COOKIE_SECURE
+from .security import current_user, admin_user, membership, audit, digest, passwords, secret, COOKIE_SECURE, decrypt
 from .permissions import document_access, document_clause, folder_access, rule_permissions
 from .storage import ROOT, version_path
 
@@ -442,7 +442,7 @@ def system_status(user=Depends(admin_user), db=Depends(get_db)):
     except ValueError: age = None
     phases = dict(db.execute(select(Document.status, func.count()).where(Document.deleted_at.is_(None)).group_by(Document.status)).all())
     last_backup = db.scalar(select(Audit.created_at).where(Audit.action == 'tenant.backup_exported').order_by(Audit.created_at.desc()).limit(1))
-    integrations = db.execute(select(Integration.kind, Integration.enabled, Integration.last_run, Integration.last_status).where(Integration.kind.in_(['imap','folder','caldav']))).all()
+    integrations = db.execute(select(Integration, Tenant.name).join(Tenant, Tenant.id == Integration.tenant_id).where(Integration.kind.in_(['imap','folder','caldav']))).all()
     return {'database': 'ok', 'worker': {'healthy': age is not None and age < 90, 'last_tick': last},
         'storage': {'total': disk.total, 'free': disk.free, 'used': disk.used, 'writable': writable,
             'scanner_available': scanner_available},
@@ -451,4 +451,5 @@ def system_status(user=Depends(admin_user), db=Depends(get_db)):
         'ocr_warnings': db.scalar(select(func.count()).select_from(Document).where(Document.ocr_failed.is_(True), Document.deleted_at.is_(None))),
         'last_tenant_backup_export': last_backup,
         'scanner_errors': db.scalar(select(func.count()).select_from(FolderImport).where(FolderImport.status == 'error')),
-        'integrations': [{'kind':k, 'enabled':enabled, 'last_run':at, 'last_status':status} for k,enabled,at,status in integrations]}
+        'integrations': [{'id':i.id, 'kind':i.kind, 'name':decrypt(i.config_encrypted).get('name', 'E-Mail-Postfach') if i.kind == 'imap' else None,
+            'tenant_name':tenant_name, 'enabled':i.enabled, 'last_run':i.last_run, 'last_status':i.last_status} for i,tenant_name in integrations]}

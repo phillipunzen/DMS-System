@@ -549,3 +549,12 @@ dialog::backdrop { background: #0a153780; backdrop-filter: blur(5px); }
 .oidc-tests{border-top:1px solid var(--border);margin-top:24px;padding-top:20px}.oidc-tests>p,.oidc-check p{font-size:13px;line-height:1.6}.oidc-check{border:1px solid var(--border);border-left:3px solid var(--green);border-radius:10px;padding:12px 14px;margin-top:10px}.oidc-check>div{display:flex;align-items:center;justify-content:space-between;gap:12px}.oidc-check p{margin:8px 0 0}.oidc-error{border-left-color:#e11d48}.oidc-success{border-left-color:#16a34a}.oidc-warning{border-left-color:#d97706}
 
 .scanner-access{margin:20px 0;padding:18px;border:1px solid var(--border);border-radius:14px}.scanner-access h3{margin-top:0}.scanner-connections{display:grid;gap:12px}.scanner-connection{padding:14px;border:1px solid var(--border);border-radius:12px}.scanner-connection h4{margin:0 0 14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}.scanner-fingerprint code{overflow-wrap:anywhere}.scanner-local-path{margin:18px 0}.scanner-local-path summary{cursor:pointer;font-weight:600}[data-scanner-ftp][hidden]{display:none}
+
+/* Separate mailbox connections remain usable on small screens. */
+.mailbox-list { display: grid; gap: 14px; margin-top: 18px; }
+.mailbox-item { border: 1px solid var(--border); border-radius: 12px; padding: 16px; min-width: 0; overflow-wrap: anywhere; }
+.mailbox-title { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.mailboxes-card .mailbox-title .badge { margin: 0; }
+.mailboxes-card .mailbox-item p { min-height: 0; margin: 9px 0; }
+.mailbox-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.mailboxes-card .mailbox-actions .btn { width: auto; max-width: none; margin: 0; }

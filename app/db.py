@@ -1,7 +1,7 @@
 import os
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import create_engine, String, Text, Integer, Boolean, DateTime, Date, ForeignKey, UniqueConstraint, JSON, BigInteger
+from sqlalchemy import create_engine, String, Text, Integer, Boolean, DateTime, Date, ForeignKey, UniqueConstraint, CheckConstraint, JSON, BigInteger
 from sqlalchemy.orm import DeclarativeBase, mapped_column, sessionmaker
 from sqlalchemy.dialects.mysql import LONGTEXT, DATETIME
 Timestamp = DateTime().with_variant(DATETIME(fsp=6), "mysql")
@@ -139,10 +139,15 @@ class Invitation(Base):
 
 class Integration(Base):
     __tablename__ = 'integrations'
-    __table_args__ = (UniqueConstraint('tenant_id', 'kind'),)
+    __table_args__ = (
+        UniqueConstraint('tenant_id', 'kind', 'account_key', name='uq_integrations_account'),
+        CheckConstraint("kind = 'imap' OR account_key = ''", name='ck_integrations_singleton'),
+    )
     id = mapped_column(String(36), primary_key=True, default=uid)
     tenant_id = mapped_column(String(36), ForeignKey('tenants.id'), index=True)
     kind = mapped_column(String(30), nullable=False)
+    # Empty identifies the existing/default connection. Only IMAP supports additional accounts.
+    account_key = mapped_column(String(36), nullable=False, default='', server_default='')
     config_encrypted = mapped_column(Text, nullable=False)
     enabled = mapped_column(Boolean, default=False)
     last_run = mapped_column(Timestamp, nullable=True)

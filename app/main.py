@@ -636,8 +636,7 @@ def integrations(tenant_id: str, user=Depends(current_user), db=Depends(get_db))
     from .folder_import import public_paths, current_errors
     result = []
     for i in db.scalars(select(Integration).where(Integration.tenant_id == tenant_id, Integration.kind != 'scanner')):
-        config = decrypt(i.config_encrypted)
-        result.append({'kind': i.kind, 'enabled': i.enabled, 'config': {k: ('••••••••' if k in {'password', 'api_key'} and v else v) for k, v in config.items()}, 'last_run': i.last_run, 'last_status': i.last_status})
+        result.append(integration_data(i))
         if i.kind == 'folder':
             result[-1]['paths'] = public_paths(tenant_id)
             result[-1]['errors'] = current_errors(db, i)
@@ -646,13 +645,98 @@ def integrations(tenant_id: str, user=Depends(current_user), db=Depends(get_db))
     return result
 
 
+def integration_data(integration):
+    config = decrypt(integration.config_encrypted)
+    return {'id': integration.id, 'kind': integration.kind, 'enabled': integration.enabled,
+            'name': config.get('name') or config.get('username') or 'E-Mail-Postfach',
+            'config': {k: ('••••••••' if k in {'password', 'api_key'} and v else v) for k, v in config.items()},
+            'last_run': integration.last_run, 'last_status': integration.last_status}
+
+
+def mailbox_for(db, tenant_id, mailbox_id):
+    row = db.scalar(select(Integration).where(Integration.id == mailbox_id,
+        Integration.tenant_id == tenant_id, Integration.kind == 'imap').with_for_update())
+    if not row:
+        raise HTTPException(404, 'Postfach nicht gefunden.')
+    return row
+
+
+def configure_mailbox(db, tenant_id, row, data):
+    from .integrations import validate_config
+    name = data.name.strip()
+    if not name:
+        raise HTTPException(422, 'Geben Sie einen Namen für das Postfach an.')
+    config = data.config.copy()
+    old = decrypt(row.config_encrypted) if row else {}
+    if config.get('password') == '••••••••':
+        config['password'] = old.get('password', '')
+    config['name'] = name
+    validate_config('imap', config, data.enabled)
+    if row is None:
+        ident = uid()
+        row = Integration(id=ident, tenant_id=tenant_id, kind='imap', account_key=ident)
+        db.add(row)
+    row.enabled = data.enabled
+    row.config_encrypted = encrypt(config)
+    return row
+
+
+@app.get('/api/tenants/{tenant_id}/mailboxes')
+def mailboxes(tenant_id: str, user=Depends(current_user), db=Depends(get_db)):
+    membership(db, user, tenant_id, 'owner')
+    return [integration_data(row) for row in db.scalars(select(Integration).where(
+        Integration.tenant_id == tenant_id, Integration.kind == 'imap').order_by(Integration.id))]
+
+
+@app.post('/api/tenants/{tenant_id}/mailboxes', status_code=201)
+def add_mailbox(tenant_id: str, data: MailboxInput, user=Depends(current_user), db=Depends(get_db)):
+    membership(db, user, tenant_id, 'owner')
+    row = configure_mailbox(db, tenant_id, None, data)
+    audit(db, user, tenant_id, 'mailbox.created', row.id)
+    db.commit()
+    return integration_data(row)
+
+
+@app.put('/api/tenants/{tenant_id}/mailboxes/{mailbox_id}')
+def update_mailbox(tenant_id: str, mailbox_id: str, data: MailboxInput, user=Depends(current_user), db=Depends(get_db)):
+    membership(db, user, tenant_id, 'owner')
+    row = configure_mailbox(db, tenant_id, mailbox_for(db, tenant_id, mailbox_id), data)
+    audit(db, user, tenant_id, 'mailbox.configured', row.id)
+    db.commit()
+    return integration_data(row)
+
+
+@app.post('/api/tenants/{tenant_id}/mailboxes/{mailbox_id}/run')
+def run_mailbox(tenant_id: str, mailbox_id: str, user=Depends(current_user), db=Depends(get_db)):
+    from .integrations import run_integration_once
+    membership(db, user, tenant_id, 'owner')
+    row = mailbox_for(db, tenant_id, mailbox_id)
+    if not row.enabled:
+        raise HTTPException(400, 'Postfach ist pausiert.')
+    status = run_integration_once(db, row)
+    audit(db, user, tenant_id, 'mailbox.run', mailbox_id)
+    db.commit()
+    return {'status': status}
+
+
+@app.delete('/api/tenants/{tenant_id}/mailboxes/{mailbox_id}')
+def remove_mailbox(tenant_id: str, mailbox_id: str, user=Depends(current_user), db=Depends(get_db)):
+    membership(db, user, tenant_id, 'owner')
+    row = mailbox_for(db, tenant_id, mailbox_id)
+    db.execute(delete(MailImport).where(MailImport.integration_id == row.id))
+    db.delete(row)
+    audit(db, user, tenant_id, 'mailbox.deleted', mailbox_id)
+    db.commit()
+    return {'ok': True}
+
+
 @app.put('/api/tenants/{tenant_id}/integrations/{kind}')
 def save_integration(tenant_id: str, kind: str, data: IntegrationInput, user=Depends(current_user), db=Depends(get_db)):
     from .integrations import validate_config
     membership(db, user, tenant_id, 'owner')
     if kind not in {'ai', 'imap', 'caldav', 'folder'}:
         raise HTTPException(404, 'Unbekannte Integration.')
-    integration = db.scalar(select(Integration).where(Integration.tenant_id == tenant_id, Integration.kind == kind).with_for_update())
+    integration = db.scalar(select(Integration).where(Integration.tenant_id == tenant_id, Integration.kind == kind, Integration.account_key == '').with_for_update())
     old = decrypt(integration.config_encrypted) if integration else {}
     config = data.config.copy()
     for key in {'password', 'api_key'}:
@@ -684,7 +768,7 @@ def save_integration(tenant_id: str, kind: str, data: IntegrationInput, user=Dep
 def run_integration(tenant_id: str, kind: str, user=Depends(current_user), db=Depends(get_db)):
     from .integrations import run_integration_once
     membership(db, user, tenant_id, 'owner')
-    integration = db.scalar(select(Integration).where(Integration.tenant_id == tenant_id, Integration.kind == kind))
+    integration = db.scalar(select(Integration).where(Integration.tenant_id == tenant_id, Integration.kind == kind, Integration.account_key == ''))
     if not integration or not integration.enabled or kind not in {'imap', 'caldav', 'folder'}:
         raise HTTPException(400, 'Integration ist nicht aktiv.')
     result = run_integration_once(db, integration, retry_errors=True)
