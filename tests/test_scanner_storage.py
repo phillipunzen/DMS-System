@@ -359,3 +359,148 @@ def test_nfs_mount_error_preserves_active_storage(tmp_path,monkeypatch,stderr,ex
         assert '/private-export' not in response.text
         assert (state/'active.json').read_bytes()==before
         assert not list(mounts.iterdir())
+
+
+@pytest.mark.parametrize('after_import',['delete','archive'])
+def test_ftp_pending_listings_and_metadata_track_import(alice,scanner,ftp_server,after_import):
+    tenant,consume=scanner;credentials=enable(alice,tenant,'ftp');client=ftp(ftp_server,credentials)
+    assert alice.put(f'/api/tenants/{tenant}/integrations/folder',json={'enabled':True,'config':{'after_import':after_import,'settle_seconds':5}}).status_code==200
+    name='Rechnung Müller 2026.txt';content=b'FTP pending invoice bytes'
+    try:
+        assert client.nlst()==[]
+        client.storbinary('STOR '+name,io.BytesIO(content))
+        source=consume/tenant/'eingang'/name
+        expected=source.stat()
+        assert client.nlst()==[name]
+        rows=dict(client.mlsd());assert rows[name]['type']=='file' and int(rows[name]['size'])==len(content)
+        assert rows[name]['modify']==time.strftime('%Y%m%d%H%M%S',time.gmtime(expected.st_mtime))
+        assert 'r' not in rows[name]['perm']
+        listing=[];client.retrlines('LIST',listing.append)
+        assert len(listing)==1 and listing[0].endswith(name) and str(len(content)) in listing[0]
+        listing=[];client.retrlines('LIST '+name,listing.append);assert len(listing)==1 and listing[0].endswith(name)
+        assert name in client.sendcmd('MLST '+name)
+        client.voidcmd('TYPE I');assert client.size(name)==len(content)
+        assert client.sendcmd('MDTM '+name)=='213 '+rows[name]['modify']
+        client.cwd('/');assert set(client.nlst())=={'eingang',name}
+        client.storbinary('STOR root.txt',io.BytesIO(b'Root-level completed upload'))
+        assert 'root.txt' in client.nlst()
+        client.cwd('/eingang');assert set(client.nlst())=={name,'root.txt'}
+        with pytest.raises(ftplib.error_perm):client.retrbinary('RETR '+name,lambda _:None)
+        with pytest.raises(ftplib.error_perm):client.delete(name)
+        with pytest.raises(ftplib.error_perm):client.rename(name,'other.txt')
+        for path in (consume/tenant/'eingang').iterdir():os.utime(path,(time.time()-10,time.time()-10))
+        result=alice.post(f'/api/tenants/{tenant}/integrations/folder/run');assert result.status_code==200,result.text
+        assert client.nlst()==[] and dict(client.mlsd())=={}
+        assert len(alice.get(f'/api/tenants/{tenant}/documents').json()['items'])==2
+        if after_import=='archive':
+            assert sorted(p.read_bytes() for p in (consume/tenant/'verarbeitet').iterdir())==sorted([content,b'Root-level completed upload'])
+            with pytest.raises(ftplib.error_perm):client.cwd('/verarbeitet')
+        with pytest.raises(ftplib.error_perm):client.sendcmd('MLST '+name)
+    finally:client.close()
+
+
+def test_sftp_pending_attributes_and_import_removal(alice,scanner,sftp_server):
+    tenant,consume=scanner;credentials=enable(alice,tenant);client,channel=sftp(sftp_server,credentials)
+    content=b'SFTP pending completed invoice'
+    try:
+        assert channel.listdir('/eingang')==[]
+        channel.putfo(io.BytesIO(content),'/eingang/scan.txt')
+        assert channel.listdir('/eingang')==['scan.txt'] and channel.listdir('/')==['scan.txt']
+        assert channel.listdir('/eingang/')==['scan.txt'] and channel.normalize('./eingang')=='/eingang'
+        attr=channel.listdir_attr('/eingang')[0];source=consume/tenant/'eingang'/'scan.txt'
+        assert attr.filename=='scan.txt' and attr.st_size==len(content) and attr.st_mtime==int(source.stat().st_mtime)
+        assert channel.stat('/eingang/scan.txt').st_size==len(content)
+        with pytest.raises(OSError):channel.getfo('/eingang/scan.txt',io.BytesIO())
+        with pytest.raises(OSError):channel.remove('/eingang/scan.txt')
+        os.utime(source,(time.time()-10,time.time()-10))
+        assert alice.post(f'/api/tenants/{tenant}/integrations/folder/run').status_code==200
+        assert channel.listdir('/eingang')==[]
+        with pytest.raises(OSError):channel.stat('/eingang/scan.txt')
+    finally:channel.close();client.close()
+
+
+@pytest.mark.parametrize('protocol',['ftp','sftp'])
+def test_pending_lists_hide_staging_links_and_other_tenants(alice,bob,scanner,ftp_server,sftp_server,protocol):
+    tenant,consume=scanner;credentials=enable(alice,tenant,protocol)
+    other=bob.post('/api/tenants',json={'name':'Other scanner inbox'}).json()['id']
+    enable(bob,other,protocol);other_paths=folder_import.directories(other)
+    (other_paths['incoming']/'private.txt').write_bytes(b'Other tenant private scan')
+    paths=folder_import.directories(tenant);incoming=paths['incoming']
+    for name,data in [('visible.txt',b'Pending scan'),('.hidden.txt',b'Hidden'),('empty.txt',b''),('partial.part',b'Partial'),('unsafe.exe',b'Unsupported'),('line\nbreak.txt',b'Invalid name')]:
+        (incoming/name).write_bytes(data)
+    (incoming/'directory.txt').mkdir()
+    (incoming/'linked.txt').symlink_to(other_paths['incoming']/'private.txt')
+    (paths['processed']/'processed.txt').write_bytes(b'Processed source')
+    stage=service.STATE/'staging'/tenant;stage.mkdir(parents=True);(stage/'upload.part').write_bytes(b'In-flight bytes')
+    if protocol=='ftp':
+        client=ftp(ftp_server,credentials)
+        try:
+            assert client.nlst()==['visible.txt'] and set(dict(client.mlsd()))=={'visible.txt'}
+            for path in ['/verarbeitet','/'+other,'/eingang/directory.txt']:
+                with pytest.raises(ftplib.error_perm):client.cwd(path)
+            with pytest.raises(ftplib.error_perm):client.sendcmd('MLST /eingang/linked.txt')
+        finally:client.close()
+    else:
+        client,channel=sftp(sftp_server,credentials)
+        try:
+            assert channel.listdir('/eingang')==['visible.txt']
+            for path in ['/verarbeitet','/'+other,'/eingang/directory.txt']:
+                with pytest.raises(OSError):channel.listdir(path)
+            with pytest.raises(OSError):channel.stat('/eingang/linked.txt')
+        finally:channel.close();client.close()
+    assert (other_paths['incoming']/'private.txt').read_bytes()==b'Other tenant private scan'
+
+
+def test_ftp_inflight_upload_is_hidden_until_publication(alice,scanner,ftp_server):
+    tenant,consume=scanner;credentials=enable(alice,tenant,'ftp');client=ftp(ftp_server,credentials);observer=ftp(ftp_server,credentials)
+    try:
+        client.voidcmd('TYPE I');data=client.transfercmd('STOR pending.txt');data.sendall(b'Complete when connection closes')
+        assert observer.nlst()==[] and not (consume/tenant/'eingang'/'pending.txt').exists()
+        data.close();assert client.voidresp().startswith('226')
+        assert observer.nlst()==['pending.txt']
+    finally:client.close();observer.close()
+
+
+@pytest.mark.parametrize('protocol',['ftp','sftp'])
+def test_rotation_revokes_metadata_browsing(alice,scanner,ftp_server,sftp_server,protocol):
+    tenant,consume=scanner;credentials=enable(alice,tenant,protocol)
+    if protocol=='ftp':
+        client=ftp(ftp_server,credentials)
+        try:
+            client.storbinary('STOR pending.txt',io.BytesIO(b'Visible before rotation'));assert client.nlst()==['pending.txt']
+            alice.post(f'/api/tenants/{tenant}/scanner/rotate')
+            with pytest.raises(ftplib.error_perm):client.nlst()
+            with pytest.raises(ftplib.error_perm):client.sendcmd('MLST pending.txt')
+        finally:client.close()
+    else:
+        client,channel=sftp(sftp_server,credentials)
+        try:
+            channel.putfo(io.BytesIO(b'Visible before rotation'),'/eingang/pending.txt');assert channel.listdir('/eingang')==['pending.txt']
+            alice.post(f'/api/tenants/{tenant}/scanner/rotate')
+            with pytest.raises(OSError):channel.listdir('/eingang')
+            with pytest.raises(OSError):channel.stat('/eingang/pending.txt')
+        finally:channel.close();client.close()
+    assert (consume/tenant/'eingang'/'pending.txt').is_file()
+
+
+def test_unavailable_storage_reports_protocol_error_without_local_fallback(alice,scanner,ftp_server,sftp_server,monkeypatch):
+    from fastapi import HTTPException
+    tenant,_=scanner;credentials=enable(alice,tenant,'ftp');client=ftp(ftp_server,credentials)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(service,'directories',lambda tid:(_ for _ in ()).throw(HTTPException(503,'NAS unreachable')))
+            with pytest.raises(ftplib.error_perm):client.nlst()
+        assert client.nlst()==[]  # Same connection is usable after NAS recovery.
+    finally:client.close()
+
+
+def test_failed_or_duplicate_source_remains_visible_until_resolved(alice,scanner,ftp_server):
+    tenant,consume=scanner;credentials=enable(alice,tenant,'ftp');client=ftp(ftp_server,credentials)
+    try:
+        content=b'Same completed scan content'
+        client.storbinary('STOR first.txt',io.BytesIO(content));source=consume/tenant/'eingang'/'first.txt';os.utime(source,(time.time()-10,time.time()-10))
+        alice.post(f'/api/tenants/{tenant}/integrations/folder/run');assert client.nlst()==[]
+        client.storbinary('STOR duplicate.txt',io.BytesIO(content));source=consume/tenant/'eingang'/'duplicate.txt';os.utime(source,(time.time()-10,time.time()-10))
+        alice.post(f'/api/tenants/{tenant}/integrations/folder/run');assert client.nlst()==['duplicate.txt']
+        assert source.read_bytes()==content
+    finally:client.close()

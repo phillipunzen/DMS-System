@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 from pathlib import Path, PurePosixPath
+from contextlib import contextmanager
 import magic
 import paramiko
 from pyftpdlib.authorizers import DummyAuthorizer, AuthenticationFailed
@@ -88,6 +89,54 @@ def scan_name(path):
         raise PermissionError(errno.EACCES, 'Nicht unterstützter Dateityp')
     if any(ord(c) < 32 for c in name): raise PermissionError(errno.EACCES, 'Ungültiger Dateiname')
     return name
+
+
+@contextmanager
+def pending_inbox(identity, protocol):
+    """Read metadata only from the current account's verified tenant inbox."""
+    try:
+        with storage_gate():
+            account(identity['username'], protocol, identity['generation'])
+            yield directories(identity['tenant_id'])['incoming']
+    except OSError:
+        raise
+    except Exception:
+        # NAS/storage-gate errors must become protocol errors, never fallback paths.
+        raise OSError(errno.EIO, 'Scanner-Eingang nicht erreichbar') from None
+
+
+def scan_info(path):
+    scan_name(path.name)
+    info = path.lstat()  # Never follow a link into archived files or another tenant.
+    if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+        raise OSError(errno.ENOENT, 'Keine abgeschlossene Scannerdatei')
+    return info
+
+
+def inbox_directory(path):
+    return PurePosixPath(path).as_posix() in {'.', '/', '/eingang', 'eingang'}
+
+
+def pending_entries(identity, protocol):
+    with pending_inbox(identity, protocol) as incoming:
+        result = []
+        for path in incoming.iterdir():
+            try:
+                result.append((path.name, scan_info(path)))
+            except (FileNotFoundError, PermissionError):
+                # Imported files can disappear while a client refreshes its list.
+                continue
+            except OSError as exc:
+                if exc.errno != errno.ENOENT:
+                    raise
+        return sorted(result, key=lambda item: item[0])
+
+
+def pending_stat(identity, protocol, path):
+    with pending_inbox(identity, protocol) as incoming:
+        if inbox_directory(path):
+            return incoming.stat()
+        return scan_info(incoming / scan_name(path))
 
 
 class ScanUpload:
@@ -219,21 +268,19 @@ class SFTPInbox(paramiko.SFTPServerInterface):
         super().__init__(server, *args, **kwargs)
         self.identity, self.ended = server.identity, False
     def session_ended(self): self.ended = True
-    def canonicalize(self, path): return '/eingang' if path in {'.', '/', '/eingang'} else path
+    def canonicalize(self, path): return '/eingang' if inbox_directory(path) else path
     def list_folder(self, path):
-        return [] if path in {'.', '/', '/eingang', 'eingang'} else paramiko.SFTP_PERMISSION_DENIED
-    def stat(self, path):
-        if path in {'.', '/', '/eingang', 'eingang'}:
-            a = paramiko.SFTPAttributes(); a.st_mode = stat.S_IFDIR | 0o700; a.st_size = 0
-            return a
+        if self.ended or not inbox_directory(path):
+            return paramiko.SFTP_PERMISSION_DENIED
         try:
-            with storage_gate():
-                account(self.identity['username'], 'sftp', self.identity['generation'])
-                filename = scan_name(path)
-                incoming = directories(self.identity['tenant_id'])['incoming']
-                target = incoming/filename
-                if target.is_symlink(): return paramiko.SFTP_PERMISSION_DENIED
-                return paramiko.SFTPAttributes.from_stat(target.stat())
+            return [paramiko.SFTPAttributes.from_stat(info, filename=name)
+                for name, info in pending_entries(self.identity, 'sftp')]
+        except OSError as exc: return paramiko.SFTPServer.convert_errno(exc.errno)
+        except Exception: return paramiko.SFTP_PERMISSION_DENIED
+    def stat(self, path):
+        if self.ended: return paramiko.SFTP_PERMISSION_DENIED
+        try:
+            return paramiko.SFTPAttributes.from_stat(pending_stat(self.identity, 'sftp', path))
         except OSError as exc: return paramiko.SFTPServer.convert_errno(exc.errno)
         except Exception: return paramiko.SFTP_PERMISSION_DENIED
     lstat = stat
@@ -300,6 +347,44 @@ class FTPAccounts(DummyAuthorizer):
 
 
 class FTPInboxFS(AbstractedFS):
+    def relative(self, path):
+        try: return Path(path).relative_to(self.root).as_posix()
+        except ValueError: raise PermissionError(errno.EACCES, 'Nur Scanner-Eingang erlaubt') from None
+
+    def listdir(self, path):
+        relative = self.relative(path)
+        if relative not in {'.', 'eingang'}:
+            raise OSError(errno.ENOTDIR, 'Nur Scanner-Eingang erlaubt')
+        names = [name for name, _ in pending_entries(self.cmd_channel.scanner_identity, 'ftp')]
+        # Root-level uploads remain supported; /eingang is the same virtual inbox.
+        return ['eingang'] + names if relative == '.' else names
+    listdirinfo = listdir
+
+    def stat(self, path):
+        return pending_stat(self.cmd_channel.scanner_identity, 'ftp', self.relative(path))
+    lstat = stat
+
+    def isdir(self, path):
+        try: return stat.S_ISDIR(self.stat(path).st_mode)
+        except OSError: return False
+
+    def isfile(self, path):
+        try: return stat.S_ISREG(self.stat(path).st_mode)
+        except OSError: return False
+
+    def lexists(self, path):
+        try: self.stat(path); return True
+        except OSError: return False
+
+    def getsize(self, path): return self.stat(path).st_size
+    def getmtime(self, path): return self.stat(path).st_mtime
+
+    def chdir(self, path):
+        if self.relative(path) not in {'.', 'eingang'}:
+            raise OSError(errno.ENOTDIR, 'Nur Scanner-Eingang erlaubt')
+        self.stat(path)  # Check account revocation and NAS access before changing cwd.
+        self.cwd = self.fs2ftp(path)
+
     def open(self, filename, mode):
         if mode != 'wb': raise OSError(errno.EACCES, 'Upload only; no resume or append')
         relative = Path(filename).relative_to(self.root).as_posix()
