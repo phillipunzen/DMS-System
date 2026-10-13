@@ -139,22 +139,12 @@ def health(db=Depends(get_db)):
 @app.get('/api/public')
 def public(request: Request, db=Depends(get_db)):
     domain = db.get(Domain, request.headers.get('host', '').split(':')[0].lower())
-    return {'app_name': setting(db, 'app_name', 'Archivraum'), 'registration_enabled': setting(db, 'registration_enabled', 'false') == 'true', 'oidc_enabled': bool(setting(db, 'oidc')), 'ldap_enabled': bool(setting(db, 'ldap')), 'domain_tenant': domain.tenant_id if domain else None, 'max_upload_mb': MAX_UPLOAD // 1024 // 1024}
+    return {'app_name': setting(db, 'app_name', 'Archivraum'), 'registration_enabled': False, 'oidc_enabled': bool(setting(db, 'oidc')), 'ldap_enabled': bool(setting(db, 'ldap')), 'domain_tenant': domain.tenant_id if domain else None, 'max_upload_mb': MAX_UPLOAD // 1024 // 1024}
 
 
 @app.post('/api/auth/register')
 def register(data: RegisterInput, response: Response, db=Depends(get_db)):
-    if setting(db, 'registration_enabled', 'false') != 'true':
-        raise HTTPException(403, 'Registrierung ist deaktiviert. Bitte eine Einladung verwenden.')
-    user = User(email=str(data.email).lower(), name=data.name, password_hash=strong_password(data.password))
-    db.add(user)
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(409, 'Registrierung nicht möglich. Bitte anmelden oder Administrator kontaktieren.')
-    login(db, user, response)
-    return user_data(user)
+    raise HTTPException(403, 'Lokale Konten benötigen eine Einladung. Alternativ über einen eingerichteten LDAP- oder OIDC-Anbieter anmelden.')
 
 
 @app.post('/api/auth/login')
@@ -707,7 +697,7 @@ def run_integration(tenant_id: str, kind: str, user=Depends(current_user), db=De
 def admin_dashboard(user=Depends(admin_user), db=Depends(get_db)):
     tenants = db.scalars(select(Tenant).order_by(Tenant.created_at.desc())).all()
     from .storage_control import storage_summary
-    return {'settings': {'app_name': setting(db, 'app_name', 'Archivraum'), 'registration_enabled': setting(db, 'registration_enabled', 'false') == 'true', 'tenant_creation_enabled': setting(db, 'tenant_creation_enabled', 'true') == 'true', 'ai_external_blocked': setting(db, 'ai_external_blocked', 'false') == 'true'}, 'tenants': [{'id': t.id, 'name': t.name, 'quota_mb': t.quota_mb, 'members': db.scalar(select(func.count()).select_from(Membership).where(Membership.tenant_id == t.id)), 'bytes': used_bytes(db, t.id)} for t in tenants], 'users': [user_data(u) | {'active': u.active} for u in db.scalars(select(User).order_by(User.created_at.desc()))], 'domains': [{'host': d.host, 'tenant_id': d.tenant_id} for d in db.scalars(select(Domain))], 'system': {'database': engine.dialect.name, **storage_summary(), 'max_upload_mb': MAX_UPLOAD // 1024 // 1024, 'cookie_secure': COOKIE_SECURE}}
+    return {'settings': {'app_name': setting(db, 'app_name', 'Archivraum'), 'registration_enabled': False, 'tenant_creation_enabled': setting(db, 'tenant_creation_enabled', 'true') == 'true', 'ai_external_blocked': setting(db, 'ai_external_blocked', 'false') == 'true'}, 'tenants': [{'id': t.id, 'name': t.name, 'quota_mb': t.quota_mb, 'members': db.scalar(select(func.count()).select_from(Membership).where(Membership.tenant_id == t.id)), 'bytes': used_bytes(db, t.id)} for t in tenants], 'users': [user_data(u) | {'active': u.active} for u in db.scalars(select(User).order_by(User.created_at.desc()))], 'domains': [{'host': d.host, 'tenant_id': d.tenant_id} for d in db.scalars(select(Domain))], 'system': {'database': engine.dialect.name, **storage_summary(), 'max_upload_mb': MAX_UPLOAD // 1024 // 1024, 'cookie_secure': COOKIE_SECURE}}
 
 
 @app.put('/api/admin/settings')

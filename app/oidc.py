@@ -8,7 +8,7 @@ from authlib.integrations.starlette_client import OAuth
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from .db import get_db, User, Identity, Invitation, now
+from .db import get_db, User, Identity
 from .security import admin_user, current_user, setting, decrypt, digest, COOKIE_SECURE
 
 router = APIRouter()
@@ -87,10 +87,8 @@ def account_check(db, info, user):
         allowed = target.active and target.id == user.id
         return check('account', 'DMS-Konto', 'success' if allowed else 'error',
                      'Dieses lokal angemeldete Konto kann unter Konto mit OIDC verknüpft werden.' if allowed else ERRORS['existing_account'])
-    invited = db.scalar(select(Invitation.id).where(Invitation.email == info['email'].lower(), Invitation.used_at.is_(None), Invitation.expires_at > now()))
-    allowed = invited or setting(db, 'registration_enabled', 'false') == 'true'
-    return check('account', 'DMS-Konto', 'success' if allowed else 'error',
-                 'Ein neues Konto darf bei regulärer Anmeldung angelegt werden.' if allowed else ERRORS['registration_disabled'])
+    return check('account', 'DMS-Konto', 'success',
+                 'Nach erfolgreicher OIDC-Anmeldung wird automatisch ein Konto angelegt. Zugriff auf bestehende Dokumentenräume erfordert eine Mitgliedschaft.')
 
 
 class TestInput(BaseModel):

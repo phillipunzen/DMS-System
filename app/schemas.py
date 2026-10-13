@@ -66,7 +66,8 @@ class IntegrationInput(BaseModel):
     config: dict
 class SettingsInput(BaseModel):
     app_name: str = Field(min_length=1, max_length=80)
-    registration_enabled: bool = False
+    # Retain the legacy API field for clients sending false; public sign-up cannot be enabled.
+    registration_enabled: Literal[False] = False
     tenant_creation_enabled: bool = True
     ai_external_blocked: bool | None = None
 class DomainInput(BaseModel):

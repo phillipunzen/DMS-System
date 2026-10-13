@@ -49,7 +49,7 @@ def provider(monkeypatch):
 def configure(verified=False):
     with SessionLocal() as db:
         db.merge(Setting(key='oidc', value=encrypt({**CONFIG, 'require_verified_email': verified})))
-        db.merge(Setting(key='registration_enabled', value='true'))
+        db.merge(Setting(key='registration_enabled', value='false'))
         db.commit()
 
 
@@ -178,7 +178,11 @@ def test_regular_login_accepts_email_without_verification(provider, verified):
     provider.update(nonce=params['nonce'][0], challenge=params['code_challenge'][0])
     response = client.get('/api/auth/oidc/callback', params={'code': 'valid', 'state': params['state'][0]}, follow_redirects=False)
     assert response.headers['location'] == '/'
-    assert client.get('/api/me').json()['email'] == 'oidc-new@example.com'
+    me = client.get('/api/me').json()
+    assert me['email'] == 'oidc-new@example.com'
+    assert not me['admin'] and me['tenants'] == []
+    with SessionLocal() as db:
+        assert db.get(User, me['id']).password_hash is None
 
 
 def test_unverified_email_does_not_take_over_existing_local_account(admin, provider):

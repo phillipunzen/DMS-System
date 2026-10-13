@@ -312,7 +312,7 @@ def test_oidc_state_pkce_signature_and_login(monkeypatch):
     config={'discovery_url':issuer+'/.well-known/openid-configuration','client_id':'dms-client','client_secret':'secret','redirect_uri':'http://localhost/api/auth/oidc/callback'}
     with SessionLocal() as db:
         db.merge(Setting(key='oidc',value=encrypt(config)))
-        db.merge(Setting(key='registration_enabled',value='true'));db.commit()
+        db.merge(Setting(key='registration_enabled',value='false'));db.commit()
     def handler(request):
         if request.url.path=='/.well-known/openid-configuration':
             return httpx.Response(200,json={'issuer':issuer,'authorization_endpoint':issuer+'/authorize','token_endpoint':issuer+'/token','jwks_uri':issuer+'/jwks','response_types_supported':['code'],'subject_types_supported':['public'],'id_token_signing_alg_values_supported':['RS256']})

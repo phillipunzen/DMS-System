@@ -5,7 +5,7 @@ from fastapi import HTTPException
 from sqlalchemy import select, case
 from ldap3 import Server, Connection, Tls, AUTO_BIND_NO_TLS, AUTO_BIND_TLS_BEFORE_BIND
 from ldap3.utils.conv import escape_filter_chars
-from .db import User, Identity, Invitation, AuthAttempt, now, engine
+from .db import User, Identity, AuthAttempt, now, engine
 from .security import setting, decrypt, digest, current_user
 
 
@@ -45,9 +45,8 @@ def external_user(db, provider, subject, email, name, request=None):
         if not authenticated or authenticated.id != user.id:
             raise HTTPException(409, 'Bestehendes Konto zuerst lokal anmelden, dann OIDC verknüpfen.')
     else:
-        invited = db.scalar(select(Invitation.id).where(Invitation.email == email, Invitation.used_at.is_(None), Invitation.expires_at > now()))
-        if not invited and setting(db, 'registration_enabled', 'false') != 'true':
-            raise HTTPException(403, 'Registrierung deaktiviert; Einladung erforderlich.')
+        # Only called after the configured LDAP/OIDC provider authenticated the user.
+        # Provider access controls account creation; tenant access still requires membership.
         user = User(email=email, name=name[:150])
         db.add(user)
         db.flush()
