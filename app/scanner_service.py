@@ -25,6 +25,7 @@ from .security import decrypt, passwords
 from .storage import MAX_UPLOAD, ALLOWED
 from .storage_control import storage_gate, root
 from .folder_import import directories, sync_directory
+from .scanner_config import protocols
 
 STATE = Path(os.getenv('SCANNER_STATE_ROOT', '/data/scanner'))
 CONNECTIONS = threading.BoundedSemaphore(40)
@@ -58,7 +59,7 @@ def account(username, protocol, generation=None):
         server = db.get(Setting, 'scanner.server')
         if protocol == 'ftp' and server and not json.loads(server.value).get('ftp_allowed', True):
             raise PermissionError(errno.EACCES, 'FTP deaktiviert')
-        if config.get('protocol') != protocol or config.get('username') != username or (generation and config.get('generation') != generation):
+        if protocol not in protocols(config) or config.get('username') != username or (generation and config.get('generation') != generation):
             raise PermissionError(errno.EACCES, 'Scannerzugang geändert')
         return config | {'tenant_id': tenant_id, 'quota': db.get(Tenant, tenant_id).quota_mb * 1024 * 1024}
 
@@ -389,6 +390,67 @@ def start_sftp(key, port=2222, host='0.0.0.0'):
     return listener
 
 
+def desired_protocols():
+    """Listen only for protocols requested by an active tenant owner."""
+    with SessionLocal() as db:
+        owners = set(db.scalars(select(Membership.tenant_id).join(User, Membership.user_id == User.id)
+            .where(Membership.role == 'owner', User.active.is_(True))))
+        wanted = set()
+        for row in db.scalars(select(Integration).where(Integration.kind == 'scanner', Integration.enabled.is_(True))):
+            if row.tenant_id in owners:
+                wanted.update(protocols(decrypt(row.config_encrypted)))
+        server = db.get(Setting, 'scanner.server')
+        if server and not json.loads(server.value).get('ftp_allowed', True):
+            wanted.discard('ftp')
+        return wanted
+
+
+class ScannerListeners:
+    def __init__(self, key, ports, host):
+        self.key, self.ports, self.host = key, ports, host
+        self.sftp = self.ftp = self.ftp_thread = None
+        self.status = {}
+
+    def stop(self, protocol):
+        if protocol == 'sftp' and self.sftp:
+            try: self.sftp.shutdown(socket.SHUT_RDWR)
+            except OSError: pass
+            self.sftp.close()
+            self.sftp = None
+        elif protocol == 'ftp' and self.ftp:
+            self.ftp.close_all()
+            if self.ftp_thread: self.ftp_thread.join(timeout=2)
+            self.ftp = self.ftp_thread = None
+
+    def close(self):
+        for protocol in ('sftp', 'ftp'): self.stop(protocol)
+
+    def reconcile(self, wanted):
+        for protocol in ('sftp', 'ftp'):
+            port = self.ports[protocol.upper() + '_LISTEN_PORT']
+            if protocol not in wanted:
+                self.stop(protocol)
+                self.status[protocol] = {'state': 'disabled', 'port': port, 'message': 'Kein aktiver Scannerzugang für dieses Protokoll.'}
+                continue
+            try:
+                if protocol == 'sftp' and self.sftp is None:
+                    self.sftp = start_sftp(self.key, port=port, host=self.host)
+                if protocol == 'ftp' and (self.ftp is None or not self.ftp_thread.is_alive()):
+                    self.stop('ftp')
+                    class Handler(FTPInbox):
+                        passive_ports = range(self.ports['FTP_PASSIVE_MIN'], self.ports['FTP_PASSIVE_MAX'] + 1)
+                    self.ftp = ThreadedFTPServer((self.host, port), Handler)
+                    self.ftp.max_cons, self.ftp.max_cons_per_ip = 40, 5
+                    self.ftp_thread = threading.Thread(target=self.ftp.serve_forever,
+                        kwargs={'timeout': 0.5, 'handle_exit': False}, daemon=True)
+                    self.ftp_thread.start()
+                self.status[protocol] = {'state': 'listening', 'port': port, 'message': 'Scannerport ist geöffnet. Netzwerk und Host-Firewall müssen den Zugriff zulassen.'}
+            except OSError:
+                self.stop(protocol)
+                self.status[protocol] = {'state': 'error', 'port': port, 'message': 'Scannerport konnte nicht geöffnet werden. Portbelegung und Bind-Adresse prüfen. Erneuter Versuch in fünf Sekunden.'}
+        return self.status
+
+
 def main():
     logging.basicConfig(level=logging.WARNING)
     logging.getLogger('paramiko').setLevel(logging.CRITICAL)
@@ -410,18 +472,22 @@ def main():
     fingerprint = 'SHA256:' + base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip('=')
     ports = scanner_ports()
     bind = os.getenv('SCANNER_LISTEN_HOST', '0.0.0.0')
-    listener = start_sftp(key, port=ports['SFTP_LISTEN_PORT'], host=bind)
-    ftp = ThreadedFTPServer((bind, ports['FTP_LISTEN_PORT']), FTPInbox)
-    ftp.max_cons, ftp.max_cons_per_ip = 40, 5
-    thread = threading.Thread(target=ftp.serve_forever, kwargs={'timeout':1, 'handle_exit':False}, daemon=True)
-    thread.start()
-    while thread.is_alive():
-        temporary = STATE/'.status.tmp'
-        temporary.write_text(json.dumps({'heartbeat': time.time(), 'host_key': fingerprint}))
-        temporary.chmod(0o600); os.replace(temporary, STATE/'status.json')
-        time.sleep(10)
-    listener.close()
-    raise SystemExit(1)
+    listeners = ScannerListeners(key, ports, bind)
+    try:
+        while True:
+            try:
+                status = listeners.reconcile(desired_protocols())
+            except Exception:
+                # Authentication still fails closed during a database outage.
+                status = {p: {'state': 'error', 'port': ports[p.upper() + '_LISTEN_PORT'],
+                    'message': 'Scannerkonfiguration nicht erreichbar. Erneuter Versuch in fünf Sekunden.'} for p in ('sftp', 'ftp')}
+            temporary = STATE/'.status.tmp'
+            temporary.write_text(json.dumps({'heartbeat': time.time(), 'host_key': fingerprint,
+                'listeners': status, 'passive_ports': {'min': ports['FTP_PASSIVE_MIN'], 'max': ports['FTP_PASSIVE_MAX']}}))
+            temporary.chmod(0o600); os.replace(temporary, STATE/'status.json')
+            time.sleep(5)
+    finally:
+        listeners.close()
 
 
 if __name__ == '__main__': main()

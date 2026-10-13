@@ -8,6 +8,7 @@ services:
     networks: !reset []
     ports: !reset []
     environment:
+      SCANNER_NETWORK_MODE: host
       APP_LISTEN_HOST: ${APP_BIND:-127.0.0.1}
       APP_LISTEN_PORT: ${APP_PORT:-8120}
       STORAGE_SERVICE_URL: http://127.0.0.1:${STORAGE_PORT:-8002}
@@ -28,6 +29,7 @@ services:
     networks: !reset []
     ports: !reset []
     environment:
+      SCANNER_NETWORK_MODE: host
       SCANNER_LISTEN_HOST: ${SCANNER_BIND:-0.0.0.0}
       SFTP_LISTEN_PORT: ${SFTP_PORT:-2222}
       FTP_LISTEN_PORT: ${FTP_PORT:-2121}

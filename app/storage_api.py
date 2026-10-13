@@ -6,10 +6,13 @@ from urllib.parse import quote
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, ConfigDict
+from typing import Literal
 from sqlalchemy import select
-from .db import Integration, Setting, get_db
+from .db import Integration, Setting, Folder, get_db
 from .security import admin_user, current_user, membership, encrypt, decrypt, passwords, audit, setting
 from .folder_import import directories
+from .scanner_config import protocols
+from .schemas import IntegrationInput
 
 router = APIRouter()
 
@@ -18,7 +21,9 @@ class ScannerInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     enabled: bool
     protocol: str = Field(default='sftp', pattern=r'^(sftp|ftp)$')
+    protocols: list[Literal['sftp', 'ftp']] | None = Field(default=None, min_length=1, max_length=2)
     ftp_confirmed: bool = False
+    folder_import: IntegrationInput | None = None
 
 
 class ScannerServerInput(BaseModel):
@@ -43,7 +48,8 @@ def scanner_data(db, tenant_id, request):
     row = scanner_row(db, tenant_id)
     config = decrypt(row.config_encrypted) if row else {}
     server = scanner_settings(db, request)
-    protocol = config.get('protocol', 'sftp')
+    selected = protocols(config)
+    protocol = selected[0]
     port = server[protocol + '_port']
     from pathlib import Path
     import json, time
@@ -52,10 +58,23 @@ def scanner_data(db, tenant_id, request):
         healthy = time.time() - live['heartbeat'] < 45
     except (OSError, ValueError, KeyError):
         live, healthy = {}, False
-    return {'enabled': bool(row and row.enabled), 'protocol': protocol, 'host': server['host'], 'port': port,
+    listeners = live.get('listeners', {}) if healthy else {}
+    connections = []
+    for name in selected:
+        listener = listeners.get(name, {})
+        if os.getenv('SCANNER_NETWORK_MODE') == 'host' and listener.get('state') == 'listening' and listener.get('port') != server[name + '_port']:
+            listener = {'state': 'error', 'message': 'Der angezeigte Port passt nicht zum laufenden Scannerport. Der Serveradmin muss Scanner-Adresse und Port in der Serverkonfiguration abgleichen.'}
+        connections.append({'protocol': name, 'host': server['host'], 'port': server[name + '_port'],
+            'directory': '/eingang', 'url': f"{name}://{quote(config.get('username', ''), safe='')}@{server['host']}:{server[name + '_port']}/eingang" if config else '',
+            'state': listener.get('state', 'unknown'), 'message': listener.get('message', ''),
+            'allowed': name != 'ftp' or server['ftp_allowed']})
+    return {'enabled': bool(row and row.enabled), 'protocol': protocol, 'protocols': selected,
+        'connections': connections, 'host': server['host'], 'port': port,
         'username': config.get('username', ''), 'password': config.get('password', ''), 'directory': '/eingang',
         'url': f"{protocol}://{quote(config.get('username', ''), safe='')}@{server['host']}:{port}/eingang" if config else '',
         'ftp_allowed': server['ftp_allowed'], 'healthy': healthy, 'host_key': live.get('host_key', ''),
+        'network_mode': os.getenv('SCANNER_NETWORK_MODE', 'bridge'),
+        'passive_ports': live.get('passive_ports', {'min': int(os.getenv('FTP_PASSIVE_MIN', '30000')), 'max': int(os.getenv('FTP_PASSIVE_MAX', '30009'))}),
         'last_status': row.last_status if row else None}
 
 
@@ -68,31 +87,46 @@ def get_scanner(tenant_id: str, request: Request, user=Depends(current_user), db
 @router.put('/api/tenants/{tenant_id}/scanner')
 def save_scanner(tenant_id: str, data: ScannerInput, request: Request, user=Depends(current_user), db=Depends(get_db)):
     membership(db, user, tenant_id, 'owner')
-    if data.enabled and data.protocol == 'ftp':
+    selected = protocols({'protocols': data.protocols}) if data.protocols is not None else [data.protocol]
+    if data.enabled and 'ftp' in selected:
         if not scanner_settings(db, request)['ftp_allowed']:
             raise HTTPException(403, 'FTP wurde vom Serveradmin deaktiviert. Bitte SFTP verwenden.')
         if not data.ftp_confirmed:
             raise HTTPException(422, 'Die unverschlüsselte FTP-Übertragung muss ausdrücklich bestätigt werden.')
+    folder = db.scalar(select(Integration).where(Integration.tenant_id == tenant_id, Integration.kind == 'folder').with_for_update())
+    if data.folder_import:
+        from .integrations import validate_config
+        folder_config = data.folder_import.config.copy()
+        validate_config('folder', folder_config, data.folder_import.enabled)
+        folder_id = folder_config.get('folder_id')
+        if folder_id and not db.scalar(select(Folder.id).where(Folder.id == folder_id, Folder.tenant_id == tenant_id)):
+            raise HTTPException(404, 'Ordner nicht gefunden.')
+        if data.enabled and not data.folder_import.enabled:
+            raise HTTPException(422, 'Für FTP/SFTP muss der Import aktiviert sein.')
     row = scanner_row(db, tenant_id)
     config = decrypt(row.config_encrypted) if row else {}
     if not config:
         password = secrets.token_urlsafe(24)
         config = {'username': 'scan_' + tenant_id.replace('-', ''), 'password': password, 'password_hash': passwords.hash(password), 'generation': secrets.token_hex(16)}
-    config['protocol'] = data.protocol
+    config['protocol'] = selected[0]
+    config['protocols'] = selected
     config['generation'] = secrets.token_hex(16)
-    if data.enabled:
+    if data.enabled or (data.folder_import and data.folder_import.enabled):
         directories(tenant_id)
-        folder = db.scalar(select(Integration).where(Integration.tenant_id == tenant_id, Integration.kind == 'folder').with_for_update())
+    if data.enabled or data.folder_import:
         if not folder:
             folder = Integration(tenant_id=tenant_id, kind='folder', config_encrypted=encrypt({'after_import': 'delete', 'settle_seconds': 5}))
             db.add(folder)
-        folder.enabled = True
+        folder.enabled = data.folder_import.enabled if data.folder_import else True
+        if data.folder_import:
+            folder.config_encrypted = encrypt(folder_config)
+            audit(db, user, tenant_id, 'integration.configured', 'folder')
     if not row:
         row = Integration(tenant_id=tenant_id, kind='scanner')
         db.add(row)
     row.enabled = data.enabled
     row.config_encrypted = encrypt(config)
-    audit(db, user, tenant_id, 'scanner.configured', data.protocol + (' enabled' if data.enabled else ' disabled'))
+    audit(db, user, tenant_id, 'scanner.configured', ','.join(selected) + (' enabled' if data.enabled else ' disabled'))
     db.commit()
     return scanner_data(db, tenant_id, request)
 

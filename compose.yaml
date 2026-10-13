@@ -13,6 +13,8 @@ services:
       SCANNER_PUBLIC_HOST: ${SCANNER_PUBLIC_HOST:-}
       SFTP_PORT: ${SFTP_PORT:-2222}
       FTP_PORT: ${FTP_PORT:-2121}
+      FTP_PASSIVE_MIN: ${FTP_PASSIVE_MIN:-30000}
+      FTP_PASSIVE_MAX: ${FTP_PASSIVE_MAX:-30009}
       NAS_MOUNT_PATH: ${NAS_MOUNT_PATH:-/srv/dms-system/nas}
       CONSUME_HOST_PATH: ${CONSUME_PATH:-./consume}
     depends_on:
@@ -92,7 +94,7 @@ services:
       FTP_PASSIVE_MAX: ${FTP_PASSIVE_MAX:-30009}
     ports:
       - "${SCANNER_BIND:-0.0.0.0}:${SFTP_PORT:-2222}:2222"
-      # Optional FTP accounts remain disabled until a tenant owner selects FTP.
+      # FTP listeners start only while an owner has enabled an FTP scanner account.
       # Firewall these LAN-only ports if FTP is not needed.
       - "${SCANNER_BIND:-0.0.0.0}:${FTP_PORT:-2121}:2121"
       - "${SCANNER_BIND:-0.0.0.0}:${FTP_PASSIVE_MIN:-30000}-${FTP_PASSIVE_MAX:-30009}:${FTP_PASSIVE_MIN:-30000}-${FTP_PASSIVE_MAX:-30009}"
