@@ -5,7 +5,7 @@ from pathlib import Path
 from sqlalchemy import select, func
 from .db import Document, DocumentVersion
 
-FIELDS = {'date', 'year', 'month', 'supplier', 'doc_type', 'title', 'original_name', 'due_date', 'amount', 'id', 'version'}
+FIELDS = {'date', 'year', 'month', 'day', 'sender', 'supplier', 'doc_type', 'title', 'original_name', 'due_date', 'amount', 'id', 'version'}
 PLACEHOLDER = re.compile(r'\{([a-z_]+)\}')
 INVALID = re.compile(r'[\\/:*?"<>|]')
 RESERVED = re.compile(r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)', re.I)
@@ -48,7 +48,8 @@ def render_filename(db, doc, template):
     created = doc.created_at
     values = {'date': created.strftime('%Y-%m-%d') if created else None,
         'year': created.strftime('%Y') if created else None, 'month': created.strftime('%m') if created else None,
-        'supplier': doc.supplier, 'doc_type': doc.doc_type, 'title': doc.title,
+        'day': created.strftime('%d') if created else None,
+        'sender': doc.supplier, 'supplier': doc.supplier, 'doc_type': doc.doc_type, 'title': doc.title,
         'original_name': Path(original).stem, 'due_date': doc.due_date.isoformat() if doc.due_date else None,
         'amount': doc.amount, 'id': doc.id, 'version': doc.current_version}
     required = PLACEHOLDER.findall(template)

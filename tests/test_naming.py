@@ -1,6 +1,6 @@
 import json
 import zipfile
-from datetime import date
+from datetime import date, datetime
 from urllib.parse import unquote
 import pytest
 from sqlalchemy import select, func
@@ -32,6 +32,33 @@ def rule(client, tid, template=None, **kwargs):
 def process(doc_id):
     with SessionLocal() as db:
         process_document(db, db.get(Document, doc_id)); db.commit()
+
+
+@pytest.mark.parametrize(('imported_at', 'expected'), [
+    (datetime(2026, 2, 3, 12), 'Absender GmbH - 2026 - 02 - 03.txt'),
+    (datetime(2024, 2, 29, 12), 'Absender GmbH - 2024 - 02 - 29.txt'),
+    (datetime(2026, 12, 31, 23, 30), 'Absender GmbH - 2026 - 12 - 31.txt'),
+])
+def test_sender_year_month_day_schema_waits_for_sender_and_uses_utc_import_date(alice, imported_at, expected):
+    tid = workspace(alice);url = f'/api/tenants/{tid}'
+    rule(alice, tid, '{sender} - {year} - {month} - {day}')
+    raw = b'Archive original retained'
+    doc = upload(alice, tid, raw)
+    with SessionLocal() as db:
+        saved = db.get(Document, doc['id'])
+        saved.created_at = imported_at;saved.due_date = date(2027, 1, 1)
+        process_document(db, saved);db.commit()
+    current = alice.get(url + '/documents/' + doc['id']).json()
+    assert current['filename'] == 'Scan_001.txt'  # Wait instead of inventing a sender.
+    payload = {key: current[key] for key in ['title', 'supplier', 'folder_id', 'doc_type', 'tags', 'amount', 'due_date', 'paid']}
+    payload['supplier'] = 'Absender GmbH'
+    response = alice.put(url + '/documents/' + doc['id'], json=payload)
+    assert response.status_code == 200 and response.json()['filename'] == expected
+    downloaded = alice.get(url + '/documents/' + doc['id'] + '/file?download=true')
+    assert downloaded.content == raw and expected in unquote(downloaded.headers['content-disposition'])
+    assert alice.post(url + '/rules/apply').json()['changed'] == 0
+    with SessionLocal() as db:
+        assert db.scalar(select(DocumentVersion.filename).where(DocumentVersion.document_id == doc['id'])) == 'Scan_001.txt'
 
 
 def test_folder_and_filename_actions_run_independently_after_ai(alice, monkeypatch):

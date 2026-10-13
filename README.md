@@ -251,12 +251,13 @@ Set up a TOTP authenticator under **Konto → Zwei-Faktor-Anmeldung**, confirm a
 
 Under **Automatische Regeln**, managers/owners can define a condition and either a destination folder, a filename template, or both. **Alle Dokumente** matches every document; other conditions match text, supplier, document type, title or filename (case-insensitive, including the current version's original import name).
 
-Enter templates **without an extension**, for example `{date}_{supplier}_{doc_type}` → `2026-10-12_Example GmbH_Rechnung.pdf`. The dialog offers placeholder buttons and a preview explicitly using sample data.
+Choose a **Namensschema** preset in the rule dialog, such as **Absender - Jahr - Monat - Tag** → `Example GmbH - 2026 - 10 - 13.pdf`. Other presets combine the import date, sender and document type, or year/month and sender. You can edit any preset to create your own template. Templates have **no extension**, for example `{sender} - {year} - {month} - {day}` or `{date}_{supplier}_{doc_type}`. The dialog offers placeholder buttons and a preview explicitly using sample data. Selecting a preset does not change the rule's matching condition; choose **Alle Dokumente** to apply it to every document.
 
 | Placeholder | Value |
 | --- | --- |
-| `{date}`, `{year}`, `{month}` | UTC import date (`YYYY-MM-DD`), year, month; these are not invoice dates |
-| `{supplier}`, `{doc_type}` | Supplier and document type from OCR/AI or edited metadata |
+| `{date}`, `{year}`, `{month}`, `{day}` | UTC import date (`YYYY-MM-DD`), four-digit year, two-digit month/day; these are not invoice dates |
+| `{sender}`, `{supplier}` | Both use the same **Lieferant / Absender** field from AI or edited document metadata; not the mail's From header |
+| `{doc_type}` | Document type from OCR/AI or edited metadata |
 | `{original_name}` | Current version's original import filename without its last extension |
 | `{title}` | Document title |
 | `{due_date}` | Invoice due date (`YYYY-MM-DD`) |
