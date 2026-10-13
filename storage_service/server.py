@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -23,6 +24,57 @@ if len(TOKEN) < 32:
 CIPHER = Fernet(base64.urlsafe_b64encode(hashlib.sha256(TOKEN.encode()).digest()))
 NAS_ROOT = Path('/data/nas')
 LOCK = threading.Lock()
+LOGGER = logging.getLogger(__name__)
+RECOVERY = {'key': None, 'connected': False, 'retrying': False,
+            'message': 'Gespeicherte NAS-Verbindung wird beim Start geprüft.',
+            'checked_at': None, 'last_success': None}
+
+
+def connection_key(data):
+    # Bind runtime health to the precise saved mount/config, never expose it.
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+
+def connection_status(data, connected, message, retrying=False):
+    timestamp = time.time()
+    key = connection_key(data)
+    if RECOVERY['key'] != key:
+        RECOVERY['last_success'] = None
+    RECOVERY.update(key=key, connected=connected, message=message,
+                    retrying=retrying, checked_at=timestamp)
+    if connected:
+        RECOVERY['last_success'] = timestamp
+
+
+def cleanup_mount(path):
+    path = Path(path)
+    if path.parent != NAS_ROOT:
+        return
+    try:
+        result = subprocess.run(['umount', str(path)], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=15)
+        if result.returncode:
+            # Do not touch a busy mount or an unfamiliar filesystem.
+            try:
+                mount_record(path)
+            except HTTPException:
+                path.rmdir()
+        else:
+            path.rmdir()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+
+def cleanup_candidate(path):
+    # A directory fsync may fail after os.replace has already published the
+    # new active state. Never detach a candidate that is now the active NAS.
+    try:
+        if active().get('mount') == str(path):
+            return
+    except (OSError, ValueError):
+        return  # Preserve an uncertain mount rather than disconnecting data.
+    cleanup_mount(path)
 
 
 def atomic_json(path, data):
@@ -238,16 +290,69 @@ def authorized(request: Request):
         raise HTTPException(401, 'Nicht autorisiert.')
 
 
-def reconnect_loop(stop):
-    while not stop.wait(20):
-        if not LOCK.acquire(blocking=False): continue
+def reconnect_once():
+    if not LOCK.acquire(blocking=False):
+        return False
+    candidate = None
+    committed = False
+    data = None
+    try:
+        data = active()
+        if data['mode'] == 'local':
+            connection_status(data, True, 'Lokaler Speicher aktiv.')
+            return True
+        config = credentials()
+        validate(config)
+        RECOVERY['retrying'] = True
+        if mounted(data['mount'], data['source'], data['fstype']):
+            try:
+                # Run as the application UID with a timeout. mountinfo alone
+                # cannot detect a stale NFS transport or an inaccessible share.
+                write_probe(Path(data['mount']), data['subdirectory'])
+            except (HTTPException, OSError):
+                connection_status(data, False, 'NAS-Verbindung wird automatisch erneuert.', True)
+            else:
+                connection_status(data, True, 'NAS-Verbindung automatisch geprüft.')
+                return True
+        else:
+            connection_status(data, False, 'NAS-Verbindung wird automatisch hergestellt.', True)
+        with storage_gate(exclusive=True):
+            # Use the same successful path as a manual same-share reconnect:
+            # prepare/verify a fresh mount, then switch state atomically. Never
+            # stack mounts, copy from the broken tree or fall back to local data.
+            candidate = NAS_ROOT / str(uuid.uuid4())
+            mount_share(config, candidate)
+            write_probe(candidate, config['subdirectory'])
+            updated = data | mount_record(candidate)
+            atomic_json(STATE_ROOT / 'active.json', updated)
+            committed = True
+            connection_status(updated, True, 'NAS-Verbindung automatisch wiederhergestellt.')
+            if mounted(data['mount'], data['source'], data['fstype']):
+                cleanup_mount(data['mount'])
+            return True
+    except Exception as exc:
+        message = 'NAS-Verbindung fehlgeschlagen. Automatischer Wiederholungsversuch folgt; gespeicherte Einstellungen bleiben erhalten.'
+        if isinstance(exc, HTTPException) and exc.status_code == 503:
+            message = 'Dateizugriff oder Speicherumstellung aktiv. Die automatische Wiederverbindung wird erneut versucht.'
+        if data:
+            connection_status(data, False, message)
+        LOGGER.warning('Automatische NAS-Verbindung fehlgeschlagen (%s); erneuter Versuch folgt.', type(exc).__name__)
+        return False
+    finally:
+        RECOVERY['retrying'] = False
         try:
-            data = active()
-            if data['mode'] == 'nas' and not mounted(data['mount'], data['source'], data['fstype']):
-                mount_share(credentials(), Path(data['mount']))
-        except Exception:
-            pass  # Credentials and paths never enter logs.
-        finally: LOCK.release()
+            if candidate and not committed:
+                cleanup_candidate(candidate)
+        finally:
+            LOCK.release()
+
+
+def reconnect_loop(stop):
+    # First attempt immediately; an unavailable NAS never blocks API startup.
+    while not stop.is_set():
+        reconnect_once()
+        if stop.wait(20):
+            break
 
 
 @asynccontextmanager
@@ -275,13 +380,18 @@ def health(): return {'ok': True}
 @app.get('/status', dependencies=[Depends(authorized)])
 def status():
     data = active()
-    connected = data['mode'] == 'local' or mounted(data['mount'], data['source'], data['fstype'])
+    recovery = RECOVERY.copy()
+    checked = recovery['key'] == connection_key(data)
+    connected = data['mode'] == 'local' or (checked and recovery['connected'] and mounted(data['mount'], data['source'], data['fstype']))
     config = {'protocol': 'local', 'subdirectory': 'archivraum', 'nfs_version': '4'}
     if data['mode'] == 'nas' and data.get('encrypted_config'):
         config = credentials()
         config['password'] = '••••••••' if config.get('password') else ''
     return {'config': config, 'mode': data['mode'], 'connected': connected, 'documents': str(LOCAL_DOCUMENTS) if data['mode']=='local' else data['mount']+'/'+data['subdirectory']+'/documents',
-        'consume': str(LOCAL_CONSUME) if data['mode']=='local' else data['mount']+'/'+data['subdirectory']+'/consume'}
+        'consume': str(LOCAL_CONSUME) if data['mode']=='local' else data['mount']+'/'+data['subdirectory']+'/consume',
+        'recovery': {'automatic': True, 'retrying': recovery['retrying'],
+                     'message': recovery['message'] if checked else 'Gespeicherte NAS-Verbindung wird automatisch geprüft.',
+                     'checked_at': recovery['checked_at'] if checked else None, 'last_success': recovery['last_success'] if checked else None}}
 
 
 @app.post('/{action}', dependencies=[Depends(authorized)])
@@ -320,18 +430,13 @@ def configure(action: str, config: dict):
                 data['encrypted_config'] = CIPHER.encrypt(json.dumps(config).encode()).decode()
             atomic_json(STATE_ROOT / 'active.json', data)
             committed = True
-            if previous['mode'] == 'nas' and previous['mount'] != data.get('mount'):
-                try:
-                    unmounted = subprocess.run(['umount', previous['mount']], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-                    if not unmounted.returncode: Path(previous['mount']).rmdir()
-                except (OSError, subprocess.TimeoutExpired): pass
+            connection_status(data, True, 'NAS-Verbindung erfolgreich geprüft.' if data['mode'] == 'nas' else 'Lokaler Speicher aktiv.')
+            if previous['mode'] == 'nas' and previous['mount'] != data.get('mount') and mounted(previous['mount'], previous['source'], previous['fstype']):
+                cleanup_mount(previous['mount'])
             return {'ok': True, 'message': 'NAS-Verbindung erneuert. Dokumente und Scannereingänge bleiben auf derselben Freigabe.' if same_nas else 'Speicher aktiviert. Vorhandene Dateien wurden mit Prüfsummen übernommen; die bisherige Kopie bleibt erhalten.', **result}
     finally:
         try:
             if candidate and not committed:
-                result = subprocess.run(['umount', str(candidate)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-                if not result.returncode or not candidate.is_mount():
-                    try: candidate.rmdir()
-                    except OSError: pass
+                cleanup_candidate(candidate)
         finally:
             LOCK.release()
